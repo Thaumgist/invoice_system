@@ -110,3 +110,24 @@ celerybeat.pid
 
 # Always keep the repository .gitignore tracked (do not ignore it)
 !.gitignore
+# Local environment and secrets (keep only the example template)
+.env*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Local data and generated artifacts
+/uploads/
+/backups/
+*.dump
+*.sql.gz
+
+# Runtime files may contain invoices, email contents, and OCR results
+/storage/
+/backend/storage/
+/backend/logs/
+/uploads/
+/data/
+*.eml
+*.msg

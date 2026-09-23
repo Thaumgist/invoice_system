@@ -4,6 +4,7 @@ import base64
 import traceback
 import os
 import time
+import re
 from collections import deque
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -102,12 +103,185 @@ class OCRService:
                 logger.error(f"获取访问令牌失败: {result}")
                 return None
                 
-        except Exception as e:
-            logger.error(f"获取百度OCR访问令牌异常: {str(e)}")
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            logger.error(f"获取百度OCR访问令牌HTTP失败: status={status_code}")
             return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"获取百度OCR访问令牌网络异常: {e.__class__.__name__}")
+            return None
+        except Exception as e:
+            logger.error(f"获取百度OCR访问令牌异常: {e.__class__.__name__}")
+            return None
+
+    def _extract_pdf_text_preview(self, file_data: bytes, max_pages: int = 2) -> str:
+        try:
+            import fitz
+
+            with fitz.open(stream=file_data, filetype="pdf") as doc:
+                pages = []
+                for page_index in range(min(max_pages, doc.page_count)):
+                    pages.append(doc.load_page(page_index).get_text("text"))
+                return "\n".join(pages)[:8000]
+        except Exception as exc:
+            logger.debug(f"OCR PDF text preview failed: {exc}")
+            return ""
+
+    def _is_train_ticket_text(self, text: str) -> bool:
+        if not text:
+            return False
+
+        compact = re.sub(r"\s+", "", text)
+        if "铁路电子客票" in compact or "电子客票号" in compact:
+            return True
+        if "买票请到12306" in compact or "中国铁路祝您旅途愉快" in compact:
+            return True
+        if "12306" in compact and ("票价" in compact or "车次" in compact):
+            return True
+        if re.search(r"\b[GCDZTKS]\d{1,4}\b", text) and "票价" in compact and "车" in compact:
+            return True
+        return False
+
+    def _detect_document_type(self, file_path: str, file_data: bytes) -> tuple[str, str]:
+        text_preview = ""
+        lower_path = (file_path or "").lower()
+        if file_data.startswith(b"%PDF") or lower_path.endswith(".pdf"):
+            text_preview = self._extract_pdf_text_preview(file_data)
+        if self._is_train_ticket_text(text_preview) or self._is_train_ticket_text(os.path.basename(file_path)):
+            return "train_ticket", text_preview
+        return "vat_invoice", text_preview
+
+    def _clean_amount(self, value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).replace(",", "").replace(" ", "").strip()
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        return match.group(0) if match else ""
+
+    def _extract_text_value(self, words_result: Dict[str, Any], key: str) -> str:
+        value = words_result.get(key)
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            return str(value.get("word") or value.get("words") or "").strip()
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    text = str(item.get("word") or item.get("words") or "").strip()
+                else:
+                    text = str(item).strip()
+                if text:
+                    return text
+            return ""
+        return str(value).strip()
+
+    def _extract_pdf_field(self, text: str, label: str) -> str:
+        if not text:
+            return ""
+        pattern = rf"{re.escape(label)}\s*[:：]\s*([^\n\r]+)"
+        match = re.search(pattern, text)
+        return match.group(1).strip() if match else ""
+
+    def _extract_train_ticket_purchaser(self, text: str) -> str:
+        purchaser = self._extract_pdf_field(text, "购买方名称") or self._extract_pdf_field(text, "购买方")
+        if purchaser:
+            return purchaser
+        match = re.search(r"\n([^\n\r:：]{2,80})\s*[\n\r]+统一社会信用代码", text or "")
+        return match.group(1).strip() if match else ""
+
+    def _normalize_train_ticket_result(self, result: Dict[str, Any], pdf_text: str = "") -> Dict[str, Any]:
+        train_words = result.get("words_result", {})
+        if not isinstance(train_words, dict):
+            train_words = {}
+
+        def pick(*values: Any) -> str:
+            for value in values:
+                text = str(value).strip() if value is not None else ""
+                if text:
+                    return text
+            return ""
+
+        invoice_num = pick(
+            self._extract_text_value(train_words, "invoice_num"),
+            self._extract_pdf_field(pdf_text, "发票号码"),
+            self._extract_text_value(train_words, "elec_ticket_num"),
+            self._extract_text_value(train_words, "ticket_num"),
+        )
+        invoice_date = pick(
+            self._extract_text_value(train_words, "invoice_date"),
+            self._extract_pdf_field(pdf_text, "开票日期"),
+            self._extract_text_value(train_words, "date"),
+        )
+        travel_date = pick(
+            self._extract_text_value(train_words, "date"),
+            self._extract_pdf_field(pdf_text, "乘车日期"),
+            self._extract_pdf_field(pdf_text, "出发日期"),
+        )
+        travel_time = pick(
+            self._extract_text_value(train_words, "time"),
+            self._extract_text_value(train_words, "TravelTime"),
+        )
+        purchaser_name = self._extract_train_ticket_purchaser(pdf_text)
+        purchaser_register_num = pick(
+            self._extract_pdf_field(pdf_text, "统一社会信用代码"),
+            self._extract_pdf_field(pdf_text, "纳税人识别号"),
+        )
+
+        ticket_amount = self._clean_amount(
+            pick(
+                self._extract_text_value(train_words, "ticket_rates"),
+                self._extract_pdf_field(pdf_text, "票价"),
+            )
+        )
+        fare = self._clean_amount(pick(self._extract_text_value(train_words, "fare"), ticket_amount))
+        tax = self._clean_amount(self._extract_text_value(train_words, "tax"))
+        amount_in_figures = ticket_amount or fare
+
+        start_station = self._extract_text_value(train_words, "starting_station")
+        destination_station = self._extract_text_value(train_words, "destination_station")
+        train_num = self._extract_text_value(train_words, "train_num")
+        commodity_name = "*运输服务*铁路旅客运输服务"
+        route_parts = []
+        if start_station and destination_station:
+            route_parts.append(f"{start_station}->{destination_station}")
+        if train_num:
+            route_parts.append(train_num)
+        if route_parts:
+            commodity_name = f"{commodity_name} {' '.join(route_parts)}"
+
+        normalized_words = dict(train_words)
+        normalized_words.update({
+            "InvoiceCode": "",
+            "InvoiceNum": invoice_num,
+            "InvoiceDate": invoice_date,
+            # 统一保留火车票出发日期/时间，供列表和详情展示；原始百度字段 date/time 也保留。
+            "TravelDate": travel_date,
+            "TravelTime": travel_time,
+            "TravelDateTime": " ".join(value for value in (travel_date, travel_time) if value),
+            "InvoiceType": "电子发票（铁路电子客票）" if "铁路电子客票" in pdf_text else "火车票",
+            "ServiceType": "交通",
+            "SellerName": "中国铁路",
+            "PurchaserName": purchaser_name,
+            "PurchaserRegisterNum": purchaser_register_num,
+            "TotalAmount": fare,
+            "TotalTax": tax,
+            "AmountInFigures": amount_in_figures,
+            "AmountInFiguers": amount_in_figures,
+            "CommodityName": [{"row": "1", "word": commodity_name}],
+            "CommodityAmount": [{"row": "1", "word": amount_in_figures}],
+            "CommodityTax": [{"row": "1", "word": tax}],
+            "CommodityTaxRate": [{"row": "1", "word": self._extract_text_value(train_words, "tax_rate")}],
+        })
+
+        normalized = dict(result)
+        normalized["ocr_document_type"] = "train_ticket"
+        normalized["baidu_endpoint"] = "train_ticket"
+        normalized["words_result"] = normalized_words
+        normalized["words_result_num"] = len([value for value in normalized_words.values() if value])
+        return normalized
     
     def recognize_invoice(self, file_path: str, user_id: int = None, invoice_id: str = None) -> Dict[str, Any]:
-        """识别PDF格式的增值税发票"""
+        """识别发票文件，按文档类型选择对应百度OCR接口。"""
         ocr_start_time = datetime.now()
         
         # 先不记录开始日志（降噪），接下来将尝试OCR缓存
@@ -185,6 +359,7 @@ class OCRService:
             
             file_size = len(file_data)
             file_base64 = base64.b64encode(file_data).decode('utf-8')
+            document_type, pdf_text_preview = self._detect_document_type(file_path_to_read, file_data)
             
 
             # OCR 结果复用优先级：1) invoices 表中已有同 sha256 的成功结果 2) OCR 缓存表
@@ -197,22 +372,30 @@ class OCRService:
                         .first()
                     )
                     if existing_invoice and isinstance(existing_invoice.ocr_raw_data, dict):
+                        cached_result = existing_invoice.ocr_raw_data
+                        if document_type == "train_ticket":
+                            cached_result = self._normalize_train_ticket_result(cached_result, pdf_text_preview)
                         OCR_REQUESTS_TOTAL.labels(result="reused_invoice").inc()
                         OCR_DURATION_SECONDS.labels(result="reused_invoice").observe((datetime.now() - ocr_start_time).total_seconds())
-                        return existing_invoice.ocr_raw_data
+                        return cached_result
                 except Exception:
                     pass
                 try:
                     cache = self.db.query(OCRCache).filter(OCRCache.sha256 == file_sha256).first()
                     if cache and cache.status == 'success' and cache.ocr_json:
+                        cached_result = cache.ocr_json
+                        if document_type == "train_ticket":
+                            cached_result = self._normalize_train_ticket_result(cached_result, pdf_text_preview)
                         OCR_REQUESTS_TOTAL.labels(result="cache_hit").inc()
                         OCR_DURATION_SECONDS.labels(result="cache_hit").observe((datetime.now() - ocr_start_time).total_seconds())
-                        return cache.ocr_json
+                        return cached_result
                 except Exception:
                     pass
 
-            # 调用百度OCR增值税发票识别API
-            url = "https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice"
+            if document_type == "train_ticket":
+                url = "https://aip.baidubce.com/rest/2.0/ocr/v1/train_ticket"
+            else:
+                url = "https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice"
             headers = {
                 "Content-Type": "application/x-www-form-urlencoded"
             }
@@ -220,10 +403,15 @@ class OCRService:
                 "access_token": self.access_token
             }
             
-            # 处理PDF文件参数
-            data = {
-                "pdf_file": file_base64
-            }
+            if file_data.startswith(b"%PDF") or file_path_to_read.lower().endswith(".pdf"):
+                data = {
+                    "pdf_file": file_base64,
+                    "pdf_file_num": "1",
+                }
+            else:
+                data = {
+                    "image": file_base64,
+                }
             
             # QPS限制：分布式全局 + 本地双限流
             self._acquire_distributed_qps_token(settings.OCR_QPS_LIMIT)
@@ -243,6 +431,11 @@ class OCRService:
             response_time = (api_response_time - api_call_time).total_seconds()
             
             result = response.json()
+            if document_type == "train_ticket" and "error_code" not in result:
+                result = self._normalize_train_ticket_result(result, pdf_text_preview)
+            elif "error_code" not in result:
+                result["ocr_document_type"] = "vat_invoice"
+                result["baidu_endpoint"] = "vat_invoice"
             
             # 检查OCR响应
             if "error_code" in result:

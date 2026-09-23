@@ -488,6 +488,16 @@ def get_status_options():
     return {
         "statuses": [
             {
+                "value": "processing",
+                "label": "处理中",
+                "description": "发票正在进行OCR或其他处理"
+            },
+            {
+                "value": "suspected_red_offset",
+                "label": "疑似红冲",
+                "description": "发票可能已被红字冲销，请人工核验"
+            },
+            {
                 "value": "printed",
                 "label": "已打印",
                 "description": "发票已打印，可用于归档"

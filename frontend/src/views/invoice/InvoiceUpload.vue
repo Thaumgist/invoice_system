@@ -11,9 +11,11 @@
               ref="uploadRef"
               class="upload-surface"
               drag
+              multiple
               :action="uploadUrl"
               :headers="uploadHeaders"
               :before-upload="beforeUpload"
+              :on-progress="handleProgress"
               :on-success="handleSuccess"
               :on-error="handleError"
               :show-file-list="false"
@@ -24,37 +26,48 @@
                 <upload-filled />
               </el-icon>
               <div class="el-upload__text">
-                将 PDF 文件拖到此处，或<em> 点击上传</em>
+                将一个或多个 PDF 文件拖到此处，或<em> 点击上传</em>
                 <div class="el-upload__tip upload-tips">
                   <el-tag size="small" effect="light">PDF</el-tag>
+                  <el-tag size="small" effect="light">可多选</el-tag>
                   <el-tag size="small" effect="light">≤ 10MB</el-tag>
                   <el-tag size="small" effect="light">推荐单页</el-tag>
                 </div>
               </div>
           </el-upload>
+          <div v-if="uploadStats.total" class="upload-summary">
+            <span>本次 {{ uploadStats.total }} 个</span>
+            <span>成功 {{ uploadStats.success }} 个</span>
+            <span v-if="uploadStats.duplicate">重复 {{ uploadStats.duplicate }} 个</span>
+            <span>失败 {{ uploadStats.failed }} 个</span>
+            <span v-if="activeUploadCount">上传中 {{ activeUploadCount }} 个</span>
+          </div>
         </el-col>
         <el-col :xs="24" :md="10" class="guides-col">
           <div class="guides-pane">
             <div class="guides-card">
               <div class="guides-title">上传须知</div>
               <ul class="guides-list">
-                <li>仅支持 PDF 格式，大小不超过 10MB。</li>
+                <li>仅支持 PDF 格式，单个文件大小不超过 10MB。</li>
                 <li>建议上传清晰、完整的单页发票，以提升识别准确率。</li>
                 <li>上传后系统会自动启动 OCR 识别，识别完成后可在列表中查看。</li>
               </ul>
             </div>
 
             <div v-if="uploadedFiles.length > 0" class="recent-card">
-              <div class="guides-title">最近上传</div>
+              <div class="guides-title">上传记录</div>
               <div class="upload-list">
                 <div
                   v-for="file in uploadedFiles"
-                  :key="file.id"
+                  :key="file.uid"
                   class="upload-item"
                 >
                   <div class="file-info">
                     <el-icon><Document /></el-icon>
-                    <span class="filename">{{ file.filename }}</span>
+                    <div class="file-text">
+                      <span class="filename">{{ file.filename }}</span>
+                      <span v-if="file.message" class="file-message">{{ file.message }}</span>
+                    </div>
                   </div>
                   <div class="file-status">
                     <el-tag :type="getStatusType(file.status)">
@@ -81,17 +94,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, type UploadProps, type UploadRawFile, type TagProps } from 'element-plus'
-import { UploadFilled, Document, ArrowLeft } from '@element-plus/icons-vue'
-  import { useUserStore } from '../../stores/user'
+import { ElMessage, type UploadProps, type UploadRawFile, type TagProps } from 'element-plus'
+import { UploadFilled, Document } from '@element-plus/icons-vue'
+import { useUserStore } from '../../stores/user'
+import { getInvoice } from '../../api/invoice'
 
 const router = useRouter()
 const userStore = useUserStore()
 
 interface UploadedFile {
-  id: string
+  uid: string
+  id?: string
   filename: string
   status: string
   message: string
@@ -100,11 +115,165 @@ interface UploadedFile {
 const uploadRef = ref()
 const uploadedFiles = ref<UploadedFile[]>([])
 const uploadDisabled = ref(false)
+const activeUploadCount = ref(0)
+const uploadStats = reactive({
+  total: 0,
+  success: 0,
+  duplicate: 0,
+  failed: 0
+})
+
+const activeUploadUids = new Set<string>()
+const completedUploadUids = new Set<string>()
+const pollingTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const uploadUrl = computed(() => '/api/v1/invoices/upload')
 const uploadHeaders = computed(() => ({
   Authorization: `Bearer ${userStore.token}`
 }))
+
+const getUploadUid = (file: any) => String(file?.uid ?? file?.raw?.uid ?? file?.name ?? crypto.randomUUID())
+
+const resetUploadBatch = () => {
+  activeUploadUids.clear()
+  completedUploadUids.clear()
+  activeUploadCount.value = 0
+  uploadStats.total = 0
+  uploadStats.success = 0
+  uploadStats.duplicate = 0
+  uploadStats.failed = 0
+}
+
+const upsertUploadRecord = (file: Partial<UploadedFile> & { uid: string; filename: string }) => {
+  const index = uploadedFiles.value.findIndex(item => item.uid === file.uid)
+  if (index === -1) {
+    uploadedFiles.value.unshift({
+      id: file.id,
+      uid: file.uid,
+      filename: file.filename,
+      status: file.status || 'uploading',
+      message: file.message || ''
+    })
+    return
+  }
+
+  uploadedFiles.value[index] = {
+    ...uploadedFiles.value[index],
+    ...file
+  }
+}
+
+const markUploadStarted = (uid: string, filename: string) => {
+  if (activeUploadUids.size === 0 && completedUploadUids.size > 0) {
+    resetUploadBatch()
+  }
+
+  upsertUploadRecord({
+    uid,
+    filename,
+    status: 'uploading',
+    message: '上传中'
+  })
+
+  if (!activeUploadUids.has(uid) && !completedUploadUids.has(uid)) {
+    activeUploadUids.add(uid)
+    activeUploadCount.value = activeUploadUids.size
+    uploadStats.total += 1
+  }
+}
+
+const markUploadFinished = (uid: string, result: 'success' | 'duplicate' | 'failed') => {
+  if (activeUploadUids.delete(uid)) {
+    activeUploadCount.value = activeUploadUids.size
+  }
+
+  if (completedUploadUids.has(uid)) return
+  completedUploadUids.add(uid)
+
+  if (result === 'success') {
+    uploadStats.success += 1
+  } else if (result === 'duplicate') {
+    uploadStats.duplicate += 1
+  } else {
+    uploadStats.failed += 1
+  }
+
+  if (activeUploadCount.value === 0 && uploadStats.total > 1) {
+    ElMessage.success(`批量上传完成：成功 ${uploadStats.success} 个，重复 ${uploadStats.duplicate} 个，失败 ${uploadStats.failed} 个`)
+  }
+}
+
+const clearPollingTimer = (uid: string) => {
+  const timer = pollingTimers.get(uid)
+  if (timer) {
+    clearTimeout(timer)
+    pollingTimers.delete(uid)
+  }
+}
+
+const pollInvoiceStatus = (uid: string, invoiceId: string, attempt = 0) => {
+  clearPollingTimer(uid)
+
+  const timer = setTimeout(async () => {
+    try {
+      const response = await getInvoice(invoiceId)
+      const invoice = response.data
+
+      if (invoice.ocr_status === 'success') {
+        upsertUploadRecord({
+          uid,
+          id: invoiceId,
+          filename: invoice.original_filename,
+          status: invoice.status === 'duplicate' ? 'duplicate' : 'completed',
+          message: invoice.status === 'duplicate' ? '发票重复，已导入为重复记录' : 'OCR识别完成'
+        })
+        clearPollingTimer(uid)
+        return
+      }
+
+      if (invoice.ocr_status === 'failed') {
+        upsertUploadRecord({
+          uid,
+          id: invoiceId,
+          filename: invoice.original_filename,
+          status: 'failed',
+          message: invoice.ocr_error_message || 'OCR识别失败'
+        })
+        clearPollingTimer(uid)
+        return
+      }
+
+      upsertUploadRecord({
+        uid,
+        id: invoiceId,
+        filename: invoice.original_filename,
+        status: 'processing',
+        message: 'OCR识别中'
+      })
+
+      if (attempt < 60) {
+        pollInvoiceStatus(uid, invoiceId, attempt + 1)
+      } else {
+        upsertUploadRecord({
+          uid,
+          id: invoiceId,
+          filename: invoice.original_filename,
+          status: 'processing',
+          message: 'OCR仍在后台处理，可到发票列表查看'
+        })
+        clearPollingTimer(uid)
+      }
+    } catch (error) {
+      if (attempt < 10) {
+        pollInvoiceStatus(uid, invoiceId, attempt + 1)
+      } else {
+        clearPollingTimer(uid)
+      }
+    }
+  }, attempt === 0 ? 1200 : 2000)
+
+  pollingTimers.set(uid, timer)
+}
 
 const beforeUpload: UploadProps['beforeUpload'] = (rawFile: UploadRawFile) => {
   // 检查文件类型
@@ -119,28 +288,43 @@ const beforeUpload: UploadProps['beforeUpload'] = (rawFile: UploadRawFile) => {
     return false
   }
   
+  markUploadStarted(getUploadUid(rawFile), rawFile.name)
   return true
 }
 
+const handleProgress: UploadProps['onProgress'] = (_event: any, uploadFile: any) => {
+  markUploadStarted(getUploadUid(uploadFile), uploadFile.name)
+}
+
 const handleSuccess = (response: any, uploadFile: any) => {
-  ElMessage.success('发票上传成功，正在进行OCR识别')
-  
-  uploadedFiles.value.unshift({
+  const uid = getUploadUid(uploadFile)
+  upsertUploadRecord({
+    uid,
     id: response.id,
     filename: uploadFile.name,
-    status: response.status,
-    message: response.message
+    status: response.status || 'processing',
+    message: response.message || '上传成功，正在进行OCR识别'
   })
-  
-  // 3秒后跳转到发票列表
-  setTimeout(() => {
-    router.push('/invoices')
-  }, 3000)
+  markUploadFinished(uid, 'success')
+  pollInvoiceStatus(uid, response.id)
+
+  if (uploadStats.total === 1) {
+    ElMessage.success('发票上传成功，正在进行OCR识别')
+  }
 }
 
 const handleError: UploadProps['onError'] = (error: any, uploadFile: any) => {
+  const uid = getUploadUid(uploadFile)
+
   // 优先从响应体读取后端返回
-  const resp = uploadFile?.response
+  let resp = uploadFile?.response || error?.response?.data || error?.response
+  if (typeof resp === 'string') {
+    try {
+      resp = JSON.parse(resp)
+    } catch {
+      // 保留原始字符串
+    }
+  }
   const detail = (resp && typeof resp === 'object') ? (resp.detail || resp.message) : undefined
   const rawMsg = typeof detail === 'object' ? detail?.message : detail
   
@@ -156,20 +340,25 @@ const handleError: UploadProps['onError'] = (error: any, uploadFile: any) => {
       undefined
     )
 
-    if (existingId) {
-      ElMessageBox.confirm(
-        rawMsg || '该发票已存在，是否前往查看？',
-        '提示',
-        { confirmButtonText: '查看', cancelButtonText: '取消', type: 'warning' }
-      ).then(() => {
-        router.push(`/invoices/${existingId}`)
-      }).catch(() => {/* 用户取消 */})
-    } else {
-      ElMessage.warning(rawMsg || '该发票已存在，无需重复上传')
-    }
+    upsertUploadRecord({
+      uid,
+      id: existingId,
+      filename: uploadFile.name,
+      status: 'duplicate',
+      message: rawMsg || '该发票已存在，无需重复上传'
+    })
+    markUploadFinished(uid, 'duplicate')
+    ElMessage.warning(rawMsg || '该发票已存在，无需重复上传')
     return
   }
 
+  upsertUploadRecord({
+    uid,
+    filename: uploadFile.name,
+    status: 'failed',
+    message: rawMsg || '发票上传失败，请重试'
+  })
+  markUploadFinished(uid, 'failed')
   console.error('上传失败:', error)
   ElMessage.error(rawMsg || '发票上传失败，请重试')
 }
@@ -177,18 +366,30 @@ const handleError: UploadProps['onError'] = (error: any, uploadFile: any) => {
 type TagType = NonNullable<TagProps['type']>
 const getStatusType = (status: string): TagType => {
   const statusMap: Record<string, TagType> = {
+    'uploading': 'warning',
     'processing': 'warning',
     'completed': 'success',
-    'failed': 'danger'
+    'duplicate': 'warning',
+    'failed': 'danger',
+    'suspected_red_offset': 'danger',
+    'archived': 'info',
+    'printed': 'info',
+    'submitted': 'primary'
   }
   return statusMap[status] || 'info'
 }
 
 const getStatusText = (status: string) => {
   const statusMap: Record<string, string> = {
-    'processing': '处理中',
+    'uploading': '上传中',
+    'processing': 'OCR处理中',
     'completed': '已完成',
-    'failed': '失败'
+    'duplicate': '重复',
+    'failed': '失败',
+    'suspected_red_offset': '疑似红冲',
+    'archived': '已归档',
+    'printed': '已打印',
+    'submitted': '已提交'
   }
   return statusMap[status] || '未知'
 }
@@ -196,6 +397,11 @@ const getStatusText = (status: string) => {
 const viewInvoice = (id: string) => {
   router.push(`/invoices/${id}`)
 }
+
+onBeforeUnmount(() => {
+  pollingTimers.forEach(timer => clearTimeout(timer))
+  pollingTimers.clear()
+})
 </script>
 
 <style scoped>
@@ -251,6 +457,15 @@ const viewInvoice = (id: string) => {
 
 .upload-tips { display: flex; gap: 8px; justify-content: center; margin-top: 12px; flex-wrap: wrap; }
 .muted { color: var(--el-text-color-secondary); margin-top: 6px; }
+.upload-summary {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--el-text-color-regular);
+  font-size: 14px;
+}
 
 .guides-pane { display: flex; flex-direction: column; gap: 16px; }
 .guides-card, .recent-card {
@@ -273,8 +488,16 @@ const viewInvoice = (id: string) => {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
-.file-info { display: flex; align-items: center; gap: 8px; }
+.file-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.file-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .filename { font-size: 14px; color: var(--el-text-color-primary); }
+.file-message {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 @media (max-width: 768px) {
   :deep(.el-upload-dragger) { height: 220px; }

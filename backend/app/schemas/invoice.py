@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from decimal import Decimal
 
@@ -28,6 +28,7 @@ class InvoiceBase(BaseModel):
     
     service_type: Optional[str] = None
     commodity_details: Optional[List[Dict[str, Any]]] = None
+    reimbursement_status: Optional[str] = "unreimbursed"
     source: Optional[str] = None  # manual | email
 
 
@@ -44,6 +45,22 @@ class InvoiceCreate(InvoiceBase):
 # 更新发票模式
 class InvoiceUpdate(InvoiceBase):
     status: Optional[str] = None
+
+
+class BatchReimbursementStatusUpdate(BaseModel):
+    invoice_ids: List[str] = Field(..., min_length=1, max_length=500)
+    reimbursement_status: Literal[
+        "unreimbursed",
+        "reimbursed",
+        "needs_reissue",
+        "processing",
+        "suspected_red_offset",
+    ]
+
+
+class BatchReimbursementStatusUpdateResponse(BaseModel):
+    updated_count: int
+    reimbursement_status: str
 
 
 # 发票响应模式
@@ -72,12 +89,15 @@ class InvoiceFilter(BaseModel):
     seller_name: Optional[str] = None
     purchaser_name: Optional[str] = None
     service_type: Optional[str] = None
+    commodity_name: Optional[str] = None
+    reimbursement_status: Optional[str] = None
     # 多选筛选（Excel 风格）
     seller_names: Optional[List[str]] = None
     purchaser_names: Optional[List[str]] = None
     service_types: Optional[List[str]] = None
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
+    amount_exact: Optional[Decimal] = None
     amount_min: Optional[Decimal] = None
     amount_max: Optional[Decimal] = None
 

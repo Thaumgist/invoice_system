@@ -1,3 +1,5 @@
+import type { Invoice } from './invoice'
+
 export interface EmailConfig {
   id: number
   user_id: number
@@ -92,6 +94,7 @@ export interface Email {
   invoice_scan_status: string
   invoice_count: number
   scan_result?: Record<string, any>
+  related_invoices?: Invoice[]
   processing_status: string
   error_message?: string
   created_at: string

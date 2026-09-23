@@ -7,10 +7,10 @@ services:
     container_name: invoice_mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-invoice_root_2024}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-invoice_system}
-      MYSQL_USER: ${MYSQL_USER:-invoice_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-invoice_pass_2024}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?}
+      MYSQL_USER: ${MYSQL_USER:?}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?}
       TZ: Asia/Shanghai
     ports:
       - "3306:3306"
@@ -46,16 +46,16 @@ services:
       - ./storage:/app/storage
       - ./backend/app:/app/app
     environment:
-      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-invoice_user}:${MYSQL_PASSWORD:-invoice_pass_2024}@mysql:3306/${MYSQL_DATABASE:-invoice_system}
+      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:?}:${MYSQL_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
       - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:?}
       - BAIDU_OCR_API_KEY=${BAIDU_OCR_API_KEY}
       - BAIDU_OCR_SECRET_KEY=${BAIDU_OCR_SECRET_KEY}
       - UPLOAD_DIR=/app/storage
       - TZ=Asia/Shanghai
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@yourdomain.com}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:?}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:?}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?}
     depends_on:
       - mysql
       - redis
@@ -72,9 +72,9 @@ services:
       - ./storage:/app/storage
       - ./backend/app:/app/app
     environment:
-      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-invoice_user}:${MYSQL_PASSWORD:-invoice_pass_2024}@mysql:3306/${MYSQL_DATABASE:-invoice_system}
+      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:?}:${MYSQL_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
       - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:?}
       - BAIDU_OCR_API_KEY=${BAIDU_OCR_API_KEY}
       - BAIDU_OCR_SECRET_KEY=${BAIDU_OCR_SECRET_KEY}
       - TZ=Asia/Shanghai
@@ -96,9 +96,9 @@ services:
       - ./storage:/app/storage
       - ./backend/app:/app/app
     environment:
-      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-invoice_user}:${MYSQL_PASSWORD:-invoice_pass_2024}@mysql:3306/${MYSQL_DATABASE:-invoice_system}
+      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:?}:${MYSQL_PASSWORD:?}@mysql:3306/${MYSQL_DATABASE:?}
       - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - SECRET_KEY=${SECRET_KEY:?}
       - BAIDU_OCR_API_KEY=${BAIDU_OCR_API_KEY}
       - BAIDU_OCR_SECRET_KEY=${BAIDU_OCR_SECRET_KEY}
       - UPLOAD_DIR=/app/storage

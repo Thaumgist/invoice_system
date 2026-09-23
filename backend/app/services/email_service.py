@@ -5,12 +5,15 @@ import requests
 from email.header import decode_header
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+from html import unescape
 import base64
 import os
 import tempfile
 import logging
 import traceback
+import zipfile
+from io import BytesIO
 
 from app.core.config import settings
 from app.models.email_config import EmailConfig
@@ -359,9 +362,9 @@ class EmailService:
         
         try:
             # 获取邮件基本信息
-            subject = self._decode_mime_words(email_message.get('Subject', ''))
-            sender = email_message.get('From', '')
-            recipient = email_message.get('To', '')
+            subject = self._truncate_header(self._decode_mime_words(email_message.get('Subject', '')), 500)
+            sender = self._truncate_header(email_message.get('From', ''), 255)
+            recipient = self._truncate_header(email_message.get('To', ''), 255)
             date_str = email_message.get('Date', '')
             
             # 解析邮件日期
@@ -378,7 +381,12 @@ class EmailService:
             email_body_html = self._get_email_body(email_message, content_type='html')
             
             # 处理附件信息
-            pdf_attachments = self._extract_pdf_attachments(email_message)
+            pdf_attachments = self._extract_pdf_attachments(
+                email_message,
+                subject=subject,
+                body_text=email_body_text,
+                body_html=email_body_html,
+            )
             all_attachments = self._get_all_attachments_info(email_message)
             
             # 构建邮件数据
@@ -404,6 +412,7 @@ class EmailService:
                     message_id = f"uid:{uid_validity}:{email_id}"
                 else:
                     message_id = f"uid:{email_id}"
+            message_id = self._truncate_header(message_id, 255)
             email_record = self.email_list_service.create_or_update_email(
                 user_id=user_id,
                 message_id=message_id,
@@ -412,6 +421,12 @@ class EmailService:
             
             # 如果是已存在的邮件记录且已处理过，直接跳过处理
             if email_record.invoice_scan_status in ['has_invoice', 'no_invoice'] and email_record.scanned_at:
+                try:
+                    email_record.processing_status = 'completed'
+                    email_record.updated_at = datetime.now()
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
                 # 降噪：已处理跳过不再单条记录
                 return results  # 返回空结果，不进行重复处理
             
@@ -423,7 +438,11 @@ class EmailService:
                 self.db.rollback()
             
             # 检查是否可能包含发票
-            if not self._is_invoice_email(subject):
+            if (
+                not self._is_invoice_email(subject)
+                and not pdf_attachments
+                and not self._has_invoice_keywords(f"{email_body_text or ''} {email_body_html or ''}")
+            ):
                 # 更新邮件状态为无发票
                 self.email_list_service.update_scan_status(
                     email_id=email_record.id,
@@ -444,13 +463,17 @@ class EmailService:
             for attachment in pdf_attachments:
                 result = self._process_pdf_attachment(user_id, attachment, email_id)
                 if result:
+                    result["email_record_id"] = email_record.id
                     results.append(result)
             
             # 处理邮件正文中的下载链接
-            pdf_links = self._extract_pdf_links(email_body_text or email_body_html or '')
+            link_body = f"{email_body_text or ''} {email_body_html or ''}"
+            pdf_links = self._extract_pdf_links(link_body)
+            link_context = f"{subject or ''} {email_body_text or ''} {email_body_html or ''}"
             for link in pdf_links:
-                result = self._download_and_process_pdf(user_id, link, email_id)
-                if result:
+                link_results = self._download_and_process_pdf(user_id, link, email_id, context_text=link_context)
+                for result in link_results:
+                    result["email_record_id"] = email_record.id
                     results.append(result)
             
             # 更新邮件扫描状态
@@ -459,6 +482,16 @@ class EmailService:
                 "attachments_processed": len(pdf_attachments),
                 "links_processed": len(pdf_links),
                 "invoices_found": len(results),
+                "files": [
+                    {
+                        "filename": item.get("filename"),
+                        "type": item.get("type"),
+                        "status": item.get("status"),
+                        "file_size": item.get("file_size"),
+                        "existing_invoice_id": item.get("existing_invoice_id"),
+                    }
+                    for item in results
+                ],
                 "scan_completed": True,
                 "scan_time": datetime.now().isoformat()
             }
@@ -484,13 +517,16 @@ class EmailService:
             
             # 尝试创建或更新邮件记录为失败状态（仅更新 processing_status，不改变 invoice_scan_status）
             try:
-                message_id = email_message.get('Message-ID', f"email_{email_id}_{int(datetime.now().timestamp())}")
+                message_id = self._truncate_header(
+                    email_message.get('Message-ID', f"email_{email_id}_{int(datetime.now().timestamp())}"),
+                    255,
+                )
                 email_record = self.email_list_service.create_or_update_email(
                     user_id=user_id,
                     message_id=message_id,
                     email_data={
-                        'subject': self._decode_mime_words(email_message.get('Subject', '')),
-                        'sender': email_message.get('From', ''),
+                        'subject': self._truncate_header(self._decode_mime_words(email_message.get('Subject', '')), 500),
+                        'sender': self._truncate_header(email_message.get('From', ''), 255),
                         'processing_status': 'failed',
                         'error_message': str(e)
                     }
@@ -525,6 +561,15 @@ class EmailService:
             logger.error(f"提交邮件处理日志失败: {str(commit_error)}")
         
         return results
+
+    def _truncate_header(self, value: str, max_length: int) -> str:
+        """限制邮件头字段长度，避免超长群发收件人写爆 MySQL varchar。"""
+        if not value:
+            return ''
+        value = str(value).strip()
+        if len(value) <= max_length:
+            return value
+        return value[: max_length - 3] + '...'
     
     def _decode_mime_words(self, s: str) -> str:
         """解码MIME编码的文本"""
@@ -541,47 +586,168 @@ class EmailService:
     
     def _is_invoice_email(self, subject: str) -> bool:
         """判断邮件是否可能包含发票"""
-        invoice_keywords = [
-            '发票', '票据', 'invoice', '开票', '电子发票', 
-            '增值税发票', '专用发票', '普通发票', '税务'
+        return self._has_invoice_keywords(subject)
+
+    def _has_invoice_keywords(self, text: str) -> bool:
+        if not text:
+            return False
+
+        text_lower = text.lower()
+        keywords = [
+            "发票", "电子发票", "增值税", "invoice", "vat invoice",
+            "开票", "税务", "票据"
         ]
-        
-        subject_lower = subject.lower()
-        return any(keyword.lower() in subject_lower for keyword in invoice_keywords)
-    
-    def _extract_pdf_attachments(self, email_message) -> List[Dict]:
-        """提取PDF附件"""
+        return any(keyword.lower() in text_lower for keyword in keywords)
+
+    def _has_strong_invoice_markers(self, text: str) -> bool:
+        if not text:
+            return False
+
+        text_lower = text.lower()
+        markers = [
+            "发票号码", "发票代码", "购买方", "销售方", "纳税人识别号",
+            "价税合计", "合计税额", "税额", "增值税电子", "数电票",
+            "invoice number", "seller", "buyer", "tax amount"
+        ]
+        return any(marker.lower() in text_lower for marker in markers)
+
+    def _has_non_invoice_travel_keywords(self, text: str) -> bool:
+        if not text:
+            return False
+
+        text_lower = text.lower()
+        keywords = [
+            "电子客票行程单", "行程信息提示", "行程单", "boarding pass",
+            "itinerary"
+        ]
+        return any(keyword.lower() in text_lower for keyword in keywords)
+
+    def _extract_pdf_text_preview(self, content: bytes, max_pages: int = 2) -> str:
+        try:
+            import fitz
+
+            with fitz.open(stream=content, filetype="pdf") as doc:
+                pages = []
+                for page_index in range(min(max_pages, doc.page_count)):
+                    pages.append(doc.load_page(page_index).get_text("text"))
+                return "\n".join(pages)[:8000]
+        except Exception as exc:
+            logger.debug(f"PDF text preview failed: {exc}")
+            return ""
+
+    def _is_likely_invoice_pdf(self, filename: str, content: bytes, context_text: str = "") -> bool:
+        hint_text = f"{filename or ''} {context_text or ''}"
+        pdf_text = self._extract_pdf_text_preview(content)
+        if self._has_non_invoice_travel_keywords(pdf_text) and not self._has_strong_invoice_markers(pdf_text):
+            return False
+        if (
+            self._has_non_invoice_travel_keywords(hint_text)
+            and not self._has_invoice_keywords(hint_text)
+            and not self._has_strong_invoice_markers(hint_text)
+        ):
+            return False
+
+        if self._has_strong_invoice_markers(pdf_text) or self._has_invoice_keywords(pdf_text):
+            return True
+
+        if self._has_invoice_keywords(hint_text):
+            return True
+
+        return False
+
+    def _extract_pdf_entries_from_zip(self, archive_filename: str, content: bytes, context_text: str = "") -> List[Dict]:
         attachments = []
-        
+        max_entries = 100
+        max_total_size = max(settings.MAX_FILE_SIZE * 5, settings.MAX_FILE_SIZE)
+        total_size = 0
+
+        try:
+            with zipfile.ZipFile(BytesIO(content)) as archive:
+                for index, info in enumerate(archive.infolist()):
+                    if index >= max_entries:
+                        break
+                    if info.is_dir() or not info.filename.lower().endswith(".pdf"):
+                        continue
+                    if info.file_size <= 0 or info.file_size > settings.MAX_FILE_SIZE:
+                        continue
+
+                    total_size += info.file_size
+                    if total_size > max_total_size:
+                        break
+
+                    try:
+                        pdf_content = archive.read(info)
+                    except RuntimeError as exc:
+                        logger.warning(f"Zip entry skipped: {archive_filename}/{info.filename}, error: {exc}")
+                        continue
+                    if not pdf_content.startswith(b"%PDF"):
+                        continue
+
+                    inner_name = os.path.basename(info.filename) or f"invoice_{len(attachments) + 1}.pdf"
+                    display_name = f"{os.path.splitext(archive_filename)[0]}__{inner_name}"
+                    if not self._is_likely_invoice_pdf(display_name, pdf_content, f"{archive_filename} {context_text}"):
+                        continue
+
+                    attachments.append({
+                        "filename": display_name,
+                        "content": pdf_content,
+                        "source_archive": archive_filename,
+                    })
+        except zipfile.BadZipFile:
+            logger.warning(f"Invalid zip attachment skipped: {archive_filename}")
+        except Exception as exc:
+            logger.error(f"Zip attachment extraction failed: {archive_filename}, error: {exc}")
+
+        return attachments
+    
+    def _extract_pdf_attachments(
+        self,
+        email_message,
+        subject: str = "",
+        body_text: str = "",
+        body_html: str = "",
+    ) -> List[Dict]:
+        """提取PDF附件，也支持安全解压 zip 中的 PDF。"""
+        attachments = []
+        context_text = f"{subject or ''} {body_text or ''} {body_html or ''}"
+
         for part in email_message.walk():
-            if part.get_content_disposition() == 'attachment':
-                filename = part.get_filename()
-                content_type = part.get_content_type()
-                
-                # 检查是否为PDF文件（通过文件名或Content-Type）
-                is_pdf = False
-                if filename:
-                    decoded_filename = self._decode_mime_words(filename)
-                    is_pdf = decoded_filename.lower().endswith('.pdf')
-                
-                if not is_pdf and content_type:
-                    is_pdf = content_type.lower() == 'application/pdf'
-                
-                if is_pdf:
-                    if not filename:
-                        decoded_filename = f"invoice_{len(attachments) + 1}.pdf"
-                    else:
-                        decoded_filename = self._decode_mime_words(filename)
-                    
-                    content = part.get_payload(decode=True)
-                    
-                    # 验证文件内容确实是PDF
-                    if content and content.startswith(b'%PDF'):
-                        attachments.append({
-                            'filename': decoded_filename,
-                            'content': content
-                        })
-        
+            if part.get_content_disposition() != 'attachment':
+                continue
+
+            filename = part.get_filename()
+            content_type = part.get_content_type()
+            decoded_filename = self._decode_mime_words(filename) if filename else ""
+            content = part.get_payload(decode=True)
+            if not content:
+                continue
+
+            is_pdf = decoded_filename.lower().endswith('.pdf')
+            if not is_pdf and content_type:
+                is_pdf = content_type.lower() == 'application/pdf'
+
+            is_zip = decoded_filename.lower().endswith('.zip')
+            if not is_zip and content_type:
+                is_zip = content_type.lower() in {
+                    'application/zip',
+                    'application/x-zip-compressed',
+                }
+            if not is_zip and content.startswith(b'PK'):
+                is_zip = True
+
+            if is_pdf:
+                display_name = decoded_filename or f"invoice_{len(attachments) + 1}.pdf"
+                if content.startswith(b'%PDF') and self._is_likely_invoice_pdf(display_name, content, context_text):
+                    attachments.append({
+                        'filename': display_name,
+                        'content': content
+                    })
+                continue
+
+            if is_zip:
+                archive_name = decoded_filename or f"archive_{len(attachments) + 1}.zip"
+                attachments.extend(self._extract_pdf_entries_from_zip(archive_name, content, context_text))
+
         return attachments
     
     def _get_all_attachments_info(self, email_message) -> List[Dict]:
@@ -601,7 +767,8 @@ class EmailService:
                             'filename': filename,
                             'content_type': content_type,
                             'size': content_size,
-                            'is_pdf': filename.lower().endswith('.pdf')
+                            'is_pdf': filename.lower().endswith('.pdf'),
+                            'is_zip': filename.lower().endswith('.zip')
                         })
         except Exception as e:
             logger.error(f"获取附件信息失败: {str(e)}")
@@ -637,15 +804,58 @@ class EmailService:
     
     def _extract_pdf_links(self, email_body: str) -> List[str]:
         """从邮件正文中提取PDF下载链接"""
-        # 匹配可能的PDF下载链接
-        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+\.pdf(?:\?[^\s<>"{}|\\^`\[\]]*)?'
-        pdf_links = re.findall(url_pattern, email_body, re.IGNORECASE)
-        
-        # 也匹配通用下载链接
-        download_pattern = r'https?://[^\s<>"{}|\\^`\[\]]*(?:download|attachment|file)[^\s<>"{}|\\^`\[\]]*'
-        download_links = re.findall(download_pattern, email_body, re.IGNORECASE)
-        
-        return list(set(pdf_links + download_links))
+        body = unescape(email_body or "")
+        if not body:
+            return []
+
+        raw_urls = re.findall(r"https?://[^\s<>\"'{}|\\^`\[\]]+", body, re.IGNORECASE)
+        links = []
+
+        def normalize_url(value: str) -> str:
+            # Do not percent-decode the whole URL. JD/AWS signed URLs require
+            # values such as %2B/%2F/%3D to remain encoded for signature checks.
+            return unescape(value or "").strip().rstrip(").,;")
+
+        def is_candidate(url: str) -> bool:
+            parsed = urlparse(url)
+            lower_url = url.lower()
+            lower_path = parsed.path.lower()
+            host = parsed.netloc.lower()
+            if lower_path.endswith(".pdf"):
+                return True
+            if lower_path.endswith(".zip"):
+                return True
+            if any(token in lower_url for token in ("download", "attachment", "file")):
+                return True
+            if "jdcloud-oss.com" in host and "/digital-invoice/" in lower_path and not lower_path.endswith(".xml"):
+                return True
+            if "storage.jd.com" in host and "/ivcself-email/" in lower_path and lower_path.endswith(".zip"):
+                return True
+            return False
+
+        def add_candidate(value: str) -> None:
+            url = normalize_url(value)
+            if url.startswith(("http://", "https://")) and is_candidate(url) and url not in links:
+                links.append(url)
+
+        redirect_param_names = {
+            "jump_to", "jump_gatewayurl", "url", "target", "targeturl",
+            "downloadurl", "download_url", "fileurl", "file_url"
+        }
+
+        for raw_url in raw_urls:
+            url = normalize_url(raw_url)
+            add_candidate(url)
+
+            parsed = urlparse(url)
+            query = parse_qs(parsed.query)
+            for key, values in query.items():
+                if key.lower() not in redirect_param_names:
+                    continue
+                for value in values:
+                    add_candidate(value)
+
+        return links
     
     def _process_pdf_attachment(self, user_id: int, attachment: Dict, email_id: str = None) -> Optional[Dict]:
         """处理PDF附件"""
@@ -717,9 +927,16 @@ class EmailService:
             logger.error(f"处理PDF附件失败: {str(e)}")
             return None
     
-    def _download_and_process_pdf(self, user_id: int, url: str, email_id: str = None) -> Optional[Dict]:
-        """下载并处理PDF链接"""
+    def _download_and_process_pdf(
+        self,
+        user_id: int,
+        url: str,
+        email_id: str = None,
+        context_text: str = "",
+    ) -> List[Dict]:
+        """下载并处理正文中的发票文件链接，支持 PDF 与 ZIP。"""
         try:
+            url = unescape(url).strip()
             # 下载文件
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -728,20 +945,45 @@ class EmailService:
             response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
             response.raise_for_status()
             
+            content_bytes = response.content or b""
+            if not content_bytes:
+                return []
+
             # 检查内容类型
             content_type = response.headers.get('content-type', '').lower()
             is_pdf_ct = ('pdf' in content_type) or ('application/octet-stream' in content_type)
-            if (not is_pdf_ct) and (not url.lower().endswith('.pdf')):
-                return None
-            
+            effective_url = response.url or url
+            effective_path = urlparse(effective_url).path.lower()
+            is_pdf_url = effective_path.endswith('.pdf')
+            is_zip_ct = 'zip' in content_type
+            is_zip_url = effective_path.endswith('.zip')
+            is_zip_magic = content_bytes.startswith(b'PK')
+
             # 获取文件名
-            filename = self._extract_filename_from_url(url, response)
-            
-            # 保存临时文件，并在一次IO中计算哈希
-            content_bytes = response.content
+            filename = self._extract_filename_from_url(effective_url, response)
+
+            if is_zip_ct or is_zip_url or is_zip_magic:
+                archive_name = filename if filename.lower().endswith('.zip') else f"{os.path.splitext(filename)[0]}.zip"
+                zip_results = []
+                for attachment in self._extract_pdf_entries_from_zip(archive_name, content_bytes, f"{effective_url} {context_text}"):
+                    result = self._process_pdf_attachment(user_id, attachment, email_id)
+                    if not result:
+                        continue
+                    result['type'] = 'download'
+                    result['url'] = effective_url
+                    if attachment.get('source_archive'):
+                        result['source_archive'] = attachment['source_archive']
+                    zip_results.append(result)
+                return zip_results
+
+            if (not is_pdf_ct) and (not is_pdf_url):
+                return []
+
             # 验证PDF魔数
             if not content_bytes or not content_bytes.startswith(b'%PDF'):
-                return None
+                return []
+            if not self._is_likely_invoice_pdf(filename, content_bytes, f"{effective_url} {context_text}"):
+                return []
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             temp_file.write(content_bytes)
             temp_file.close()
@@ -774,34 +1016,54 @@ class EmailService:
                             os.unlink(temp_file.name)
                         except Exception:
                             pass
-                        return {
+                        return [{
                             'type': 'download',
                             'filename': filename,
                             'status': 'duplicate',
-                            'url': url,
+                            'url': effective_url,
                             'file_size': file_size,
                             'file_md5_hash': file_md5_hash,
                             'file_sha256_hash': file_sha256_hash,
                             'existing_invoice_id': existing.id,
-                        }
+                        }]
             except Exception:
                 # 预判失败不影响后续流程
                 pass
             
-            return {
+            return [{
                 'type': 'download',
                 'filename': filename,
                 'status': 'processed',
-                'url': url,
+                'url': effective_url,
                 'file_path': temp_file.name,
                 'file_size': file_size,
                 'file_md5_hash': file_md5_hash,
                 'file_sha256_hash': file_sha256_hash
-            }
+            }]
             
         except Exception as e:
-            logger.error(f"下载PDF失败: {url}, 错误: {str(e)}")
-            return None
+            logger.error(
+                f"下载PDF失败: {self._safe_url_for_log(url)}, "
+                f"错误: {self._safe_error_for_log(e)}"
+            )
+            return []
+
+    def _safe_url_for_log(self, url: str) -> str:
+        """记录下载地址时隐藏签名参数。"""
+        try:
+            parsed = urlparse(unescape(url or ""))
+            if parsed.scheme and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        except Exception:
+            pass
+        return "<invalid-url>"
+
+    def _safe_error_for_log(self, error: Exception) -> str:
+        """隐藏第三方异常消息中携带的签名 URL 参数。"""
+        text = str(error)
+        for raw_url in re.findall(r"https?://[^\s<>\"'{}|\\^`\[\]]+", text, re.IGNORECASE):
+            text = text.replace(raw_url, self._safe_url_for_log(raw_url))
+        return text
     
     def _extract_filename_from_url(self, url: str, response) -> str:
         """从URL或响应头中提取文件名"""
@@ -820,9 +1082,17 @@ class EmailService:
             filename = os.path.basename(path)
             if filename and '.' in filename:
                 return filename
+
+        query = parse_qs(parsed_url.query)
+        for values in query.values():
+            for value in values:
+                candidate = os.path.basename(unescape(value or ""))
+                if candidate and '.' in candidate:
+                    return candidate
         
         # 默认文件名
-        return f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        default_ext = '.zip' if 'zip' in response.headers.get('content-type', '').lower() else '.pdf'
+        return f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}{default_ext}"
     
     def get_user_email_configs(self, user_id: int) -> List[EmailConfig]:
         """获取用户的邮箱配置"""

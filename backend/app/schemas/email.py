@@ -5,6 +5,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from app.schemas.invoice import Invoice as InvoiceSchema
 
 
 class EmailBase(BaseModel):
@@ -46,6 +47,7 @@ class Email(EmailBase):
     scan_result: Optional[Dict[str, Any]] = None
     processing_status: str
     error_message: Optional[str] = None
+    related_invoices: List[InvoiceSchema] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     scanned_at: Optional[datetime] = None

@@ -52,9 +52,10 @@ class Invoice(Base):
     service_type = Column(String(50), index=True)  # 消费类型，用于分类打印
     commodity_details = Column(JSON)  # 商品明细，JSON格式存储
     ocr_raw_data = Column(JSON)  # OCR原始返回数据
+    reimbursement_status = Column(String(30), default="unreimbursed", index=True)  # unreimbursed, reimbursed, needs_reissue, processing, suspected_red_offset
 
     # 状态管理
-    status = Column(String(20), default="processing", index=True)  # pending, processing, completed, failed, archived, duplicate
+    status = Column(String(30), default="processing", index=True)  # pending, processing, completed, failed, archived, duplicate, suspected_red_offset
     ocr_status = Column(String(20), default="pending")  # pending, processing, success, failed
     ocr_error_message = Column(Text)
 

@@ -126,31 +126,33 @@ def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = No
             error_msg = ocr_result.get("error_msg", "OCR识别失败")
             error_code = ocr_result.get("error_code")
             # 当服务商返回QPS超限（例如 error_code=18）时，采用指数退避重试
+            is_rate_limited = False
             try:
-                if int(error_code) == 18 and self.request.retries < self.max_retries:
-                    backoff_seconds = min(60, (2 ** self.request.retries))  # 1, 2, 4, ... 上限60
-                    logger.warning(f"OCR QPS超限，{backoff_seconds}s后重试: {invoice_id}")
-                    # 记录重试日志
-                    try:
-                        logging_service.log_ocr_event(
-                            db=self.db,
-                            event_type="ocr_rate_limited_retry",
-                            message=f"OCR QPS超限，{backoff_seconds}s后重试",
-                            user_id=user_id,
-                            invoice_id=invoice_id,
-                            details={
-                                "error_code": error_code,
-                                "retry_in_seconds": backoff_seconds,
-                                "retry_count": self.request.retries + 1,
-                                "max_retries": self.max_retries,
-                            },
-                            log_level="WARNING",
-                        )
-                    except Exception:
-                        pass
-                    raise self.retry(countdown=backoff_seconds)
+                is_rate_limited = int(error_code) == 18
             except Exception:
                 pass
+            if is_rate_limited and self.request.retries < self.max_retries:
+                backoff_seconds = min(60, (2 ** self.request.retries))  # 1, 2, 4, ... 上限60
+                logger.warning(f"OCR QPS超限，{backoff_seconds}s后重试: {invoice_id}")
+                # 记录重试日志
+                try:
+                    logging_service.log_ocr_event(
+                        db=self.db,
+                        event_type="ocr_rate_limited_retry",
+                        message=f"OCR QPS超限，{backoff_seconds}s后重试",
+                        user_id=user_id,
+                        invoice_id=invoice_id,
+                        details={
+                            "error_code": error_code,
+                            "retry_in_seconds": backoff_seconds,
+                            "retry_count": self.request.retries + 1,
+                            "max_retries": self.max_retries,
+                        },
+                        log_level="WARNING",
+                    )
+                except Exception:
+                    pass
+                raise self.retry(countdown=backoff_seconds)
             invoice_service.update_ocr_result(
                 invoice_id, 
                 {"error_message": error_msg}, 

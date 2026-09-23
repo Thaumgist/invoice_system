@@ -88,6 +88,56 @@ def is_email_scan_running(user_id: int, config_id: int = None) -> bool:
         return False
 
 
+def record_email_scan_file_result(user_id: int, scan_result: dict, invoice_result: str = None, status: str = None):
+    """把邮件扫描文件和最终发票记录关联起来，供邮件列表内嵌展示。"""
+    email_record_id = scan_result.get("email_record_id")
+    if not email_record_id:
+        return
+
+    from app.models.email import Email
+
+    db = SessionLocal()
+    try:
+        email_record = db.query(Email).filter(
+            Email.id == email_record_id,
+            Email.user_id == user_id,
+        ).first()
+        if not email_record:
+            return
+
+        payload = dict(email_record.scan_result or {})
+        files = list(payload.get("files") or [])
+        entry = {
+            "filename": scan_result.get("filename"),
+            "type": scan_result.get("type"),
+            "status": status or scan_result.get("status"),
+            "file_size": scan_result.get("file_size"),
+        }
+        existing_invoice_id = scan_result.get("existing_invoice_id")
+        if invoice_result and invoice_result != "DUPLICATE":
+            entry["invoice_id"] = invoice_result
+        if existing_invoice_id:
+            entry["existing_invoice_id"] = existing_invoice_id
+
+        files = [
+            item for item in files
+            if not (
+                isinstance(item, dict)
+                and item.get("filename") == entry.get("filename")
+                and item.get("type") == entry.get("type")
+            )
+        ]
+        files.append(entry)
+        payload["files"] = files
+        email_record.scan_result = payload
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"记录邮件扫描文件关联失败: {exc}")
+    finally:
+        db.close()
+
+
 class DatabaseTask(Task):
     """带数据库会话的Celery任务基类"""
     _db = None
@@ -221,6 +271,12 @@ def scan_emails_task(self, config_id: int = None, days: int = 7):
                         if result.get("status") == "duplicate":
                             duplicate_count += 1
                             EMAIL_DUPLICATES.labels(type="attachment").inc()
+                            record_email_scan_file_result(
+                                config.user_id,
+                                result,
+                                result.get("existing_invoice_id"),
+                                "duplicate",
+                            )
                             continue
 
                         invoice_result = _process_scanned_file(
@@ -232,8 +288,20 @@ def scan_emails_task(self, config_id: int = None, days: int = 7):
                         if invoice_result == "DUPLICATE":
                             duplicate_count += 1
                             EMAIL_DUPLICATES.labels(type="create_invoice").inc()
+                            record_email_scan_file_result(
+                                config.user_id,
+                                result,
+                                None,
+                                "duplicate",
+                            )
                         elif invoice_result:
                             success_count += 1
+                            record_email_scan_file_result(
+                                config.user_id,
+                                result,
+                                invoice_result,
+                                "success",
+                            )
                             processed_files.append({
                                 "filename": result.get("filename"),
                                 "invoice_id": invoice_result,
@@ -502,6 +570,12 @@ def manual_email_scan_task(self, user_id: int, config_id: int = None, days: int 
                         # 如果上游或下游已经标记重复，计数后跳过
                         if result.get("status") == "duplicate":
                             duplicate_count += 1
+                            record_email_scan_file_result(
+                                user_id,
+                                result,
+                                result.get("existing_invoice_id"),
+                                "duplicate",
+                            )
                             continue
 
                         invoice_result = _process_scanned_file(
@@ -510,8 +584,20 @@ def manual_email_scan_task(self, user_id: int, config_id: int = None, days: int 
                         
                         if invoice_result == "DUPLICATE":
                             duplicate_count += 1
+                            record_email_scan_file_result(
+                                user_id,
+                                result,
+                                None,
+                                "duplicate",
+                            )
                         elif invoice_result:
                             success_count += 1
+                            record_email_scan_file_result(
+                                user_id,
+                                result,
+                                invoice_result,
+                                "success",
+                            )
                             processed_files.append({
                                 "filename": result.get("filename"),
                                 "type": result.get("type"),
@@ -917,4 +1003,3 @@ def _log_system_event(user_id: int, log_type: str, log_level: str, message: str,
             db.close()
         except Exception as e2:
             logger.error(f"记录系统日志fallback也失败: {str(e2)}")
-

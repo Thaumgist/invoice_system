@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import hashlib
@@ -8,6 +9,9 @@ import uuid  # 附件仍需基于UUID生成临时唯一文件名
 from pathlib import Path
 import tempfile
 import hashlib
+import zipfile
+from decimal import Decimal
+from datetime import datetime
 
 from app.core.database import get_db
 from app.core.deps import get_current_active_user
@@ -15,13 +19,14 @@ from app.core.config import settings, get_absolute_file_path, get_relative_file_
 from app.services.invoice_service import InvoiceService
 from app.schemas.invoice import (
     Invoice, InvoiceCreate, InvoiceUpdate, InvoiceFilter, 
-    PaginationParams, InvoiceListResponse, InvoiceUploadResponse, OCRRetryRequest
+    PaginationParams, InvoiceListResponse, InvoiceUploadResponse, OCRRetryRequest,
+    BatchReimbursementStatusUpdate, BatchReimbursementStatusUpdateResponse
 )
 from app.schemas.user import User
 from app.workers.ocr_tasks import process_invoice_ocr
 from app.core.metrics import EMAIL_DUPLICATES
 from hashlib import md5, sha256
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 
 router = APIRouter()
@@ -146,6 +151,11 @@ def get_invoices(
     ocr_status: Optional[str] = Query(None, description="OCR状态筛选"),
     seller_name: Optional[str] = Query(None, description="销售方名称筛选"),
     service_type: Optional[str] = Query(None, description="消费类型筛选"),
+    commodity_name: Optional[str] = Query(None, description="商品名称筛选"),
+    reimbursement_status: Optional[str] = Query(None, description="报销状态筛选"),
+    amount_exact: Optional[Decimal] = Query(None, description="精确金额筛选"),
+    amount_min: Optional[Decimal] = Query(None, description="最低金额筛选"),
+    amount_max: Optional[Decimal] = Query(None, description="最高金额筛选"),
     include_duplicates: bool = Query(False, description="是否包含重复样本"),
     page: int = Query(1, ge=1, description="页码"),
     size: int = Query(20, ge=1, le=100, description="每页数量"),
@@ -159,7 +169,12 @@ def get_invoices(
         status=status,
         ocr_status=ocr_status,
         seller_name=seller_name,
-        service_type=service_type
+        service_type=service_type,
+        commodity_name=commodity_name,
+        reimbursement_status=reimbursement_status,
+        amount_exact=amount_exact,
+        amount_min=amount_min,
+        amount_max=amount_max,
     )
     
     pagination = PaginationParams(page=page, size=size)
@@ -184,12 +199,28 @@ class InvoiceSearchRequest(BaseModel):
     seller_name: Optional[str] = None
     purchaser_name: Optional[str] = None
     service_type: Optional[str] = None
+    commodity_name: Optional[str] = None
+    reimbursement_status: Optional[str] = None
+    amount_exact: Optional[Decimal] = None
+    amount_min: Optional[Decimal] = None
+    amount_max: Optional[Decimal] = None
     seller_names: Optional[list[str]] = None
     purchaser_names: Optional[list[str]] = None
     service_types: Optional[list[str]] = None
     include_duplicates: bool = False
     page: int = 1
     size: int = 20
+
+
+class BatchInvoiceDownloadRequest(BaseModel):
+    invoice_ids: List[str] = Field(..., min_length=1, max_length=500)
+
+
+def _remove_temporary_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 @router.post("/search", response_model=InvoiceListResponse)
@@ -207,6 +238,11 @@ def search_invoices(
         seller_name=body.seller_name,
         purchaser_name=body.purchaser_name,
         service_type=body.service_type,
+        commodity_name=body.commodity_name,
+        reimbursement_status=body.reimbursement_status,
+        amount_exact=body.amount_exact,
+        amount_min=body.amount_min,
+        amount_max=body.amount_max,
         seller_names=body.seller_names,
         purchaser_names=body.purchaser_names,
         service_types=body.service_types,
@@ -271,6 +307,27 @@ def get_invoice_filter_options(
         "purchasers": purchasers,
         "service_types": SERVICE_TYPE_OPTIONS,
     }
+
+
+@router.post("/batch/reimbursement-status", response_model=BatchReimbursementStatusUpdateResponse)
+def batch_update_reimbursement_status(
+    body: BatchReimbursementStatusUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """批量更新已选发票的报销状态"""
+    invoice_service = InvoiceService(db)
+    updated_count = invoice_service.batch_update_reimbursement_status(
+        body.invoice_ids,
+        current_user.id,
+        body.reimbursement_status,
+    )
+    return BatchReimbursementStatusUpdateResponse(
+        updated_count=updated_count,
+        reimbursement_status=body.reimbursement_status,
+    )
+
+
 
 
 @router.get("/{invoice_id}", response_model=Invoice)
@@ -453,3 +510,68 @@ def download_invoice(
         media_type="application/pdf",
         filename=invoice.original_filename or f"{invoice_id}.pdf"
     )
+
+
+@router.post("/batch/download")
+def download_invoices(
+    body: BatchInvoiceDownloadRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """将当前用户选中的发票原始文件打包为 ZIP 下载。"""
+    invoice_service = InvoiceService(db)
+    requested_ids = list(dict.fromkeys(body.invoice_ids))
+    invoices = []
+    missing_ids = []
+    for invoice_id in requested_ids:
+        invoice = invoice_service.get_invoice(invoice_id, current_user.id)
+        if not invoice:
+            missing_ids.append(invoice_id)
+        else:
+            invoices.append(invoice)
+
+    if missing_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"部分发票不存在或无权访问: {', '.join(missing_ids[:5])}",
+        )
+
+    temporary_file = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    temporary_file.close()
+    used_names: set[str] = set()
+    added_count = 0
+    try:
+        with zipfile.ZipFile(temporary_file.name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for invoice in invoices:
+                file_path = get_absolute_file_path(invoice.file_path)
+                if not os.path.isfile(file_path):
+                    continue
+
+                original_name = Path(invoice.original_filename or f"{invoice.id}.pdf").name
+                base_name = original_name or f"{invoice.id}.pdf"
+                archive_name = base_name
+                suffix = 2
+                while archive_name in used_names:
+                    stem = Path(base_name).stem
+                    extension = Path(base_name).suffix
+                    archive_name = f"{stem}_{suffix}{extension}"
+                    suffix += 1
+                used_names.add(archive_name)
+                archive.write(file_path, arcname=archive_name)
+                added_count += 1
+
+        if not added_count:
+            _remove_temporary_file(temporary_file.name)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="选中的发票文件不存在")
+
+        return FileResponse(
+            path=temporary_file.name,
+            media_type="application/zip",
+            filename=f"invoices_{len(invoices)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            background=BackgroundTask(_remove_temporary_file, temporary_file.name),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        _remove_temporary_file(temporary_file.name)
+        raise

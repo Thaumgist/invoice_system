@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
-import type { Invoice, InvoiceFilter, InvoiceListResponse, InvoiceUpdate } from '@/types/invoice'
+import type { Invoice, InvoiceFilter, InvoiceListResponse, InvoiceUpdate, ReimbursementStatus } from '@/types/invoice'
 import { 
   getInvoices, 
   getInvoice, 
   updateInvoice, 
+  batchUpdateReimbursementStatus,
   deleteInvoice, 
   uploadInvoice, 
   retryOCR 
@@ -17,10 +18,10 @@ interface InvoiceState {
   pagination: {
     page: number
     size: number
-    total: number
-    pages: number
+      total: number
+      pages: number
   }
-  selectedInvoices: string[]
+  selectedInvoiceMap: Record<string, Invoice>
 }
 
 export const useInvoiceStore = defineStore('invoice', {
@@ -35,13 +36,20 @@ export const useInvoiceStore = defineStore('invoice', {
       total: 0,
       pages: 0
     },
-    selectedInvoices: []
+    selectedInvoiceMap: {}
   }),
   
   getters: {
     filteredInvoices: (state) => state.invoices,
-    hasSelected: (state) => state.selectedInvoices.length > 0,
-    selectedCount: (state) => state.selectedInvoices.length,
+    selectedInvoices: (state) => Object.values(state.selectedInvoiceMap),
+    selectedInvoiceIds: (state) => Object.keys(state.selectedInvoiceMap),
+    hasSelected: (state) => Object.keys(state.selectedInvoiceMap).length > 0,
+    selectedCount: (state) => Object.keys(state.selectedInvoiceMap).length,
+    selectedTotalAmount: (state) => Object.values(state.selectedInvoiceMap).reduce((total, invoice) => {
+      const amount = invoice.amount_in_figures ?? invoice.total_amount
+      const numericAmount = Number(amount)
+      return Number.isFinite(numericAmount) ? total + numericAmount : total
+    }, 0),
   },
   
   actions: {
@@ -64,6 +72,11 @@ export const useInvoiceStore = defineStore('invoice', {
         const data: InvoiceListResponse = response.data
         
         this.invoices = data.items
+        for (const invoice of data.items) {
+          if (this.selectedInvoiceMap[invoice.id]) {
+            this.selectedInvoiceMap[invoice.id] = invoice
+          }
+        }
         this.pagination = {
           page: data.page,
           size: data.size,
@@ -111,11 +124,52 @@ export const useInvoiceStore = defineStore('invoice', {
         if (this.currentInvoice?.id === id) {
           this.currentInvoice = response.data
         }
+
+        if (this.selectedInvoiceMap[id]) {
+          this.selectedInvoiceMap[id] = response.data
+        }
         
         return true
       } catch (error) {
         console.error('更新发票失败:', error)
         return false
+      }
+    },
+
+    async batchUpdateReimbursementStatus(invoiceIds: string[], reimbursementStatus: ReimbursementStatus): Promise<number | null> {
+      try {
+        const response = await batchUpdateReimbursementStatus({
+          invoice_ids: invoiceIds,
+          reimbursement_status: reimbursementStatus
+        })
+
+        const invoiceIdSet = new Set(invoiceIds)
+        this.invoices = this.invoices.map(invoice => (
+          invoiceIdSet.has(invoice.id)
+            ? { ...invoice, reimbursement_status: reimbursementStatus }
+            : invoice
+        ))
+
+        if (this.currentInvoice && invoiceIdSet.has(this.currentInvoice.id)) {
+          this.currentInvoice = {
+            ...this.currentInvoice,
+            reimbursement_status: reimbursementStatus
+          }
+        }
+
+        for (const invoiceId of invoiceIds) {
+          const selectedInvoice = this.selectedInvoiceMap[invoiceId]
+          if (!selectedInvoice) continue
+          this.selectedInvoiceMap[invoiceId] = {
+            ...selectedInvoice,
+            reimbursement_status: reimbursementStatus
+          }
+        }
+
+        return response.data.updated_count
+      } catch (error) {
+        console.error('批量更新报销状态失败:', error)
+        return null
       }
     },
     
@@ -125,7 +179,7 @@ export const useInvoiceStore = defineStore('invoice', {
         
         // 从本地状态中移除
         this.invoices = this.invoices.filter(invoice => invoice.id !== id)
-        this.selectedInvoices = this.selectedInvoices.filter(selectedId => selectedId !== id)
+        delete this.selectedInvoiceMap[id]
         
         if (this.currentInvoice?.id === id) {
           this.currentInvoice = null
@@ -148,6 +202,14 @@ export const useInvoiceStore = defineStore('invoice', {
           invoice.ocr_status = 'pending'
           invoice.ocr_error_message = undefined
         }
+
+        if (this.selectedInvoiceMap[id]) {
+          this.selectedInvoiceMap[id] = {
+            ...this.selectedInvoiceMap[id],
+            ocr_status: 'pending',
+            ocr_error_message: undefined
+          }
+        }
         
         return true
       } catch (error) {
@@ -160,25 +222,38 @@ export const useInvoiceStore = defineStore('invoice', {
       this.filters = { ...filters }
     },
     
-    toggleSelection(id: string): void {
-      const index = this.selectedInvoices.indexOf(id)
-      if (index > -1) {
-        this.selectedInvoices.splice(index, 1)
-      } else {
-        this.selectedInvoices.push(id)
+    syncVisibleSelection(visibleInvoices: Invoice[], selectedVisibleInvoices: Invoice[]): void {
+      const visibleIdSet = new Set(visibleInvoices.map(invoice => invoice.id))
+      const selectedVisibleInvoiceMap = new Map(
+        selectedVisibleInvoices.map(invoice => [invoice.id, invoice] as const)
+      )
+
+      for (const invoiceId of visibleIdSet) {
+        if (!selectedVisibleInvoiceMap.has(invoiceId)) {
+          delete this.selectedInvoiceMap[invoiceId]
+        }
+      }
+
+      for (const invoice of selectedVisibleInvoices) {
+        this.selectedInvoiceMap[invoice.id] = invoice
       }
     },
-    
-    selectAll(): void {
-      this.selectedInvoices = this.invoices.map(invoice => invoice.id)
+
+    setInvoiceSelected(invoice: Invoice, selected: boolean): void {
+      if (selected) {
+        this.selectedInvoiceMap[invoice.id] = invoice
+        return
+      }
+
+      delete this.selectedInvoiceMap[invoice.id]
     },
     
     clearSelection(): void {
-      this.selectedInvoices = []
+      this.selectedInvoiceMap = {}
     },
     
     isSelected(id: string): boolean {
-      return this.selectedInvoices.includes(id)
+      return Boolean(this.selectedInvoiceMap[id])
     }
   }
 })

@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc
+from sqlalchemy import String, and_, cast, desc, func, or_
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Tuple
 from datetime import datetime
@@ -161,6 +161,9 @@ class InvoiceService:
         
         if filters.ocr_status:
             query = query.filter(Invoice.ocr_status == filters.ocr_status)
+
+        if getattr(filters, 'reimbursement_status', None):
+            query = query.filter(Invoice.reimbursement_status == filters.reimbursement_status)
         
         if filters.seller_name:
             query = query.filter(Invoice.seller_name.ilike(f"%{filters.seller_name}%"))
@@ -179,6 +182,17 @@ class InvoiceService:
         # Excel 风格多选：发票类型（对应 service_type）
         if getattr(filters, 'service_types', None):
             query = query.filter(Invoice.service_type.in_(filters.service_types))
+
+        if getattr(filters, 'commodity_name', None):
+            commodity_name = filters.commodity_name.strip()
+            if commodity_name:
+                like_value = f"%{commodity_name}%"
+                query = query.filter(
+                    or_(
+                        cast(Invoice.commodity_details, String).like(like_value),
+                        cast(Invoice.ocr_raw_data, String).like(like_value),
+                    )
+                )
         
         if filters.date_from:
             query = query.filter(Invoice.invoice_date >= filters.date_from)
@@ -186,11 +200,15 @@ class InvoiceService:
         if filters.date_to:
             query = query.filter(Invoice.invoice_date <= filters.date_to)
         
-        if filters.amount_min:
-            query = query.filter(Invoice.total_amount >= filters.amount_min)
-        
-        if filters.amount_max:
-            query = query.filter(Invoice.total_amount <= filters.amount_max)
+        amount_expr = func.coalesce(Invoice.amount_in_figures, Invoice.total_amount)
+        if getattr(filters, 'amount_exact', None) is not None:
+            query = query.filter(amount_expr == filters.amount_exact)
+        else:
+            if filters.amount_min is not None:
+                query = query.filter(amount_expr >= filters.amount_min)
+
+            if filters.amount_max is not None:
+                query = query.filter(amount_expr <= filters.amount_max)
         
         # 计算总数
         total = query.count()
@@ -256,6 +274,37 @@ class InvoiceService:
             pass
         
         return invoice
+
+    def batch_update_reimbursement_status(
+        self,
+        invoice_ids: List[str],
+        user_id: int,
+        reimbursement_status: str,
+    ) -> int:
+        """批量更新当前用户发票的报销状态。"""
+        unique_invoice_ids = list(dict.fromkeys(invoice_ids))
+        if not unique_invoice_ids:
+            return 0
+
+        updated_count = (
+            self.db.query(Invoice)
+            .filter(
+                and_(
+                    Invoice.user_id == user_id,
+                    Invoice.id.in_(unique_invoice_ids),
+                    Invoice.reimbursement_status != reimbursement_status,
+                )
+            )
+            .update(
+                {
+                    Invoice.reimbursement_status: reimbursement_status,
+                    Invoice.updated_at: datetime.now(),
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        return updated_count
     
     def update_ocr_result(self, invoice_id: str, ocr_data: dict, status: str = "success") -> bool:
         """更新OCR识别结果（先判重后赋值；重复样本不占用 invoice_num）"""

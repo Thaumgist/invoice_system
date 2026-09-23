@@ -204,11 +204,16 @@ function sanitizeHtml(html: string): string {
 const rescanEmail = async () => {
   try {
     rescanning.value = true
-    await batchOperationEmails({
+    const response = await batchOperationEmails({
       email_ids: [props.email.id],
       operation: 'rescan'
     })
-    ElMessage.success('重新扫描已启动')
+    const message = response.data?.message || '重新扫描完成'
+    if (response.data?.success === false) {
+      ElMessage.warning(message)
+    } else {
+      ElMessage.success(message)
+    }
     emit('refresh')
   } catch (error) {
     const err = error as any

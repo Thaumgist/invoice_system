@@ -36,11 +36,13 @@
             <!-- 筛选条件 -->
             <div class="filter-section mb-20">
               <el-form :model="filters" :inline="true" size="small">
-                <el-form-item label="状态">
-                  <el-select v-model="filters.status" placeholder="选择状态" clearable>
+                <el-form-item label="OCR状态">
+                  <el-select v-model="filters.ocr_status" placeholder="选择OCR状态" clearable>
                     <el-option label="全部" value="" />
-                    <el-option label="已完成" value="completed" />
-                    <el-option label="处理中" value="processing" />
+                    <el-option label="待处理" value="pending" />
+                    <el-option label="识别中" value="processing" />
+                    <el-option label="成功" value="success" />
+                    <el-option label="失败" value="failed" />
                   </el-select>
                 </el-form-item>
                 
@@ -83,8 +85,8 @@
                       <span class="amount">¥{{ invoice.total_amount || 0 }}</span>
                     </div>
                     <div class="invoice-status">
-                      <el-tag size="small" :type="getStatusType(invoice.status) as any">
-                        {{ getStatusText(invoice.status) }}
+                      <el-tag size="small" :type="getReimbursementStatusType(invoice.reimbursement_status) as any">
+                        {{ getReimbursementStatusText(invoice.reimbursement_status) }}
                       </el-tag>
                       <span class="service-type">{{ invoice.service_type || '未分类' }}</span>
                     </div>
@@ -287,12 +289,13 @@ import type { Invoice } from '../../types/invoice'
 const invoiceStore = useInvoiceStore()
 const printStore = usePrintStore()
 
-const selectedInvoices = ref<string[]>([])
+// 复用发票列表中的全局选择，确保跨页面/跨路由进入批量打印时保留勾选集合
+const selectedInvoices = computed(() => invoiceStore.selectedInvoiceIds)
 const batchStatus = ref('')
 const printFormRef = ref<FormInstance>()
 
 const filters = reactive({
-  status: '',
+  ocr_status: '',
   seller_name: ''
 })
 
@@ -336,25 +339,27 @@ watch(() => printConfig.invoice_type, (newType) => {
   }
 })
 
-// 方法
-const getStatusType = (status: string) => {
+// 报销状态展示
+const getReimbursementStatusType = (status?: string) => {
   const statusMap: Record<string, string> = {
-    'processing': 'warning',
-    'completed': 'success',
-    'failed': 'danger',
-    'printed': 'info'
+    unreimbursed: 'info',
+    reimbursed: 'success',
+    needs_reissue: 'danger',
+    processing: 'warning',
+    suspected_red_offset: 'danger'
   }
-  return statusMap[status] || 'info'
+  return statusMap[status || 'unreimbursed'] || 'info'
 }
 
-const getStatusText = (status: string) => {
+const getReimbursementStatusText = (status?: string) => {
   const statusMap: Record<string, string> = {
-    'processing': '处理中',
-    'completed': '已完成',
-    'failed': '失败',
-    'printed': '已打印'
+    unreimbursed: '未报销',
+    reimbursed: '已报销',
+    needs_reissue: '需换开',
+    processing: '报销中',
+    suspected_red_offset: '疑似红冲'
   }
-  return statusMap[status] || '未知'
+  return statusMap[status || 'unreimbursed'] || '未报销'
 }
 
 const isSelected = (invoiceId: string) => {
@@ -362,20 +367,19 @@ const isSelected = (invoiceId: string) => {
 }
 
 const toggleSelection = (invoiceId: string) => {
-  const index = selectedInvoices.value.indexOf(invoiceId)
-  if (index > -1) {
-    selectedInvoices.value.splice(index, 1)
-  } else {
-    selectedInvoices.value.push(invoiceId)
-  }
+  const invoice = availableInvoices.value.find(item => item.id === invoiceId)
+  if (!invoice) return
+  invoiceStore.setInvoiceSelected(invoice, !invoiceStore.isSelected(invoiceId))
 }
 
 const selectAll = () => {
-  selectedInvoices.value = availableInvoices.value.map(invoice => invoice.id)
+  for (const invoice of availableInvoices.value) {
+    invoiceStore.setInvoiceSelected(invoice, true)
+  }
 }
 
 const clearSelection = () => {
-  selectedInvoices.value = []
+  invoiceStore.clearSelection()
 }
 
 const refreshSelectedInvoices = async () => {

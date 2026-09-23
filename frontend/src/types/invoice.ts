@@ -34,9 +34,12 @@ export interface Invoice {
   service_type?: string
   commodity_details?: any[]
   ocr_raw_data?: any
+  reimbursement_status?: 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'processing' | 'suspected_red_offset'
+  travel_date?: string
+  travel_time?: string
   
   // 状态
-  status: string
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'archived' | 'duplicate' | 'printed' | 'submitted' | 'suspected_red_offset' | string
   ocr_status: string
   ocr_error_message?: string
   
@@ -52,14 +55,17 @@ export interface InvoiceFilter {
   seller_name?: string
   purchaser_name?: string
   service_type?: string
+  commodity_name?: string
+  reimbursement_status?: string
   // 多选（Excel 风格）
   seller_names?: string[]
   purchaser_names?: string[]
   service_types?: string[]
   date_from?: string
   date_to?: string
-  amount_min?: number
-  amount_max?: number
+  amount_exact?: number | string
+  amount_min?: number | string
+  amount_max?: number | string
   include_duplicates?: boolean
 }
 
@@ -96,5 +102,18 @@ export interface InvoiceUpdate {
   amount_in_figures?: number
   service_type?: string
   commodity_details?: any[]
+  reimbursement_status?: 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'processing' | 'suspected_red_offset'
   status?: string
+}
+
+export type ReimbursementStatus = 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'processing' | 'suspected_red_offset'
+
+export interface BatchReimbursementStatusUpdate {
+  invoice_ids: string[]
+  reimbursement_status: ReimbursementStatus
+}
+
+export interface BatchReimbursementStatusUpdateResponse {
+  updated_count: number
+  reimbursement_status: ReimbursementStatus
 }

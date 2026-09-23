@@ -1,7 +1,7 @@
 <template>
   <el-container class="layout-container">
-    <el-aside :width="isCollapsed ? '64px' : '220px'" :class="['sidebar', { collapsed: isCollapsed }]">
-      <div class="logo" :class="{ collapsed: isCollapsed }">
+    <el-aside :width="sidebarCollapsed ? '64px' : '220px'" :class="['sidebar', { collapsed: sidebarCollapsed }]">
+      <div class="logo" :class="{ collapsed: sidebarCollapsed }">
         <div class="logo-icon">
           <img :src="logoUrl" alt="Logo" class="logo-img" />
         </div>
@@ -12,11 +12,11 @@
         :default-active="activeMenu"
         class="sidebar-menu"
         router
-        :collapse="isCollapsed"
+        :collapse="sidebarCollapsed"
         :collapse-transition="false"
       >
         <el-menu-item index="/dashboard">
-          <el-tooltip :effect="tooltipEffect" content="工作台" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="工作台" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><HomeFilled /></el-icon>
               <span>工作台</span>
@@ -25,7 +25,7 @@
         </el-menu-item>
         
         <el-menu-item index="/invoices">
-          <el-tooltip :effect="tooltipEffect" content="发票列表" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="发票列表" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><Document /></el-icon>
               <span>发票列表</span>
@@ -34,7 +34,7 @@
         </el-menu-item>
 
         <el-menu-item index="/invoices/upload">
-          <el-tooltip :effect="tooltipEffect" content="发票上传" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="发票上传" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><UploadFilled /></el-icon>
               <span>发票上传</span>
@@ -43,7 +43,7 @@
         </el-menu-item>
         
         <el-menu-item index="/emails">
-          <el-tooltip :effect="tooltipEffect" content="邮件列表" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="邮件列表" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><Message /></el-icon>
               <span>邮件列表</span>
@@ -52,7 +52,7 @@
         </el-menu-item>
         
         <el-menu-item index="/print">
-          <el-tooltip :effect="tooltipEffect" content="批量打印" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="批量打印" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><Printer /></el-icon>
               <span>批量打印</span>
@@ -61,7 +61,7 @@
         </el-menu-item>
         
         <el-menu-item index="/logs">
-          <el-tooltip :effect="tooltipEffect" content="系统日志" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="系统日志" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><Document /></el-icon>
               <span>系统日志</span>
@@ -70,7 +70,7 @@
         </el-menu-item>
 
         <el-menu-item index="/monitoring">
-          <el-tooltip :effect="tooltipEffect" content="系统监控" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="系统监控" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><Monitor /></el-icon>
               <span>系统监控</span>
@@ -79,7 +79,7 @@
         </el-menu-item>
 
         <el-menu-item index="/settings">
-          <el-tooltip :effect="tooltipEffect" content="邮箱设置" placement="right" :disabled="!isCollapsed" :popper-options="tooltipPopperOptions">
+          <el-tooltip :effect="tooltipEffect" content="邮箱设置" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
             <div class="menu-item-inner">
               <el-icon><Setting /></el-icon>
               <span>邮箱设置</span>
@@ -88,10 +88,10 @@
         </el-menu-item>
       </el-menu>
 
-      <div class="sidebar-footer" :class="{ collapsed: isCollapsed }">
-        <div class="collapse-toggle" @click="isCollapsed = !isCollapsed" :title="isCollapsed ? '展开' : '收起'">
+      <div class="sidebar-footer" :class="{ collapsed: sidebarCollapsed }">
+        <div class="collapse-toggle" @click="isCollapsed = !isCollapsed" :title="sidebarCollapsed ? '展开' : '收起'">
           <el-icon size="18">
-            <Expand v-if="isCollapsed" />
+            <Expand v-if="sidebarCollapsed" />
             <Fold v-else />
           </el-icon>
         </div>
@@ -195,7 +195,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { 
@@ -236,6 +236,21 @@ const userAvatar = computed(() => '')
 themeStore.initTheme()
 
 const isCollapsed = ref(false)
+const isMobile = ref(false)
+const sidebarCollapsed = computed(() => isCollapsed.value || isMobile.value)
+
+const updateMobileLayout = () => {
+  isMobile.value = window.matchMedia('(max-width: 767px)').matches
+}
+
+onMounted(() => {
+  updateMobileLayout()
+  window.addEventListener('resize', updateMobileLayout)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateMobileLayout)
+})
 // 让 Tooltip 在右侧空间不足时自动翻转到左侧，避免被裁切
 const tooltipPopperOptions = {
   placement: 'right',
@@ -343,6 +358,11 @@ const handleClosePasswordDialog = () => {
 <style scoped>
 .layout-container {
   height: 100vh;
+  min-width: 0;
+}
+
+.layout-container > :deep(.el-container) {
+  min-width: 0;
 }
 
 .sidebar {
@@ -582,6 +602,31 @@ const handleClosePasswordDialog = () => {
 .main-content {
   background-color: var(--el-bg-color-page);
   padding: 20px;
+  min-width: 0;
+  overflow-x: hidden;
   transition: var(--theme-transition);
+}
+
+@media (max-width: 767px) {
+  .main-content {
+    padding: 16px;
+  }
+
+  .header {
+    padding: 0 12px;
+  }
+
+  .header-left {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .header-right {
+    gap: 8px;
+  }
+
+  .username {
+    display: none;
+  }
 }
 </style>

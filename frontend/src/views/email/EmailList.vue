@@ -123,10 +123,91 @@
           <el-table 
             :data="emails" 
             v-loading="loading"
+            :expand-row-keys="expandedInvoiceRowKeys"
+            :row-class-name="getEmailRowClassName"
             @selection-change="handleSelectionChange"
             row-key="id"
             stripe
           >
+          <el-table-column type="expand" width="42">
+            <template #default="{ row }">
+              <div v-if="hasRelatedInvoices(row)" class="email-invoices-detail">
+                <div class="inline-invoice-title">此邮件包含的发票</div>
+                <el-table
+                  :data="row.related_invoices"
+                  size="small"
+                  border
+                  class="email-invoice-table"
+                >
+                  <el-table-column prop="seller_name" label="销售方" min-width="180">
+                    <template #default="{ row: invoice }">
+                      {{ invoice.seller_name || '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="purchaser_name" label="购方" min-width="160">
+                    <template #default="{ row: invoice }">
+                      {{ invoice.purchaser_name || '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="商品名称" min-width="180">
+                    <template #default="{ row: invoice }">
+                      <el-tooltip
+                        v-if="getFirstCommodityName(invoice) !== '-'"
+                        :content="getFirstCommodityName(invoice)"
+                        placement="top"
+                      >
+                        <span class="commodity-name">{{ getFirstCommodityName(invoice) }}</span>
+                      </el-tooltip>
+                      <span v-else>-</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="金额" width="110">
+                    <template #default="{ row: invoice }">
+                      <span :class="{ amount: hasValidAmount(invoice.amount_in_figures) }">
+                        {{ formatAmount(invoice.amount_in_figures) }}
+                      </span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="service_type" label="消费类型" width="110">
+                    <template #default="{ row: invoice }">
+                      {{ invoice.service_type || '未知' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="报销状态" width="110">
+                    <template #default="{ row: invoice }">
+                      <el-tag size="small" :type="getReimbursementStatusType(invoice.reimbursement_status)">
+                        {{ getReimbursementStatusText(invoice.reimbursement_status) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="OCR状态" width="100">
+                    <template #default="{ row: invoice }">
+                      <el-tag size="small" :type="getOCRStatusType(invoice.ocr_status)">
+                        {{ getOCRStatusText(invoice.ocr_status) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="invoice_date" label="开票日期" width="110">
+                    <template #default="{ row: invoice }">
+                      {{ formatInvoiceDate(invoice.invoice_date) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="130" fixed="right">
+                    <template #default="{ row: invoice }">
+                      <div class="table-actions">
+                        <el-button link size="small" type="primary" @click="openInvoiceDetail(invoice)">
+                          详情
+                        </el-button>
+                        <el-button link size="small" type="success" @click="downloadInvoiceFile(invoice)">
+                          下载
+                        </el-button>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column type="selection" width="55" />
           
           <el-table-column label="主题" min-width="200">
@@ -232,6 +313,12 @@
           @refresh="refreshData"
         />
       </el-dialog>
+
+      <InvoiceDetailDialog
+        v-model="invoiceDetailDialogVisible"
+        :invoice="selectedInvoice"
+        @saved="loadEmails"
+      />
     </div>
   </div>
   
@@ -242,12 +329,15 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Operation, Paperclip } from '@element-plus/icons-vue'
 import EmailDetail from '../../components/EmailDetail.vue'
+import InvoiceDetailDialog from '../../components/InvoiceDetailDialog.vue'
 import { 
   getEmails, 
   getEmailStatistics, 
   batchOperationEmails 
 } from '../../api/emailList'
+import { downloadInvoice as apiDownloadInvoice } from '../../api/invoice'
 import type { Email, EmailStatistics } from '../../types/email'
+import type { Invoice } from '../../types/invoice'
 type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger' | undefined
 
 // 响应式数据
@@ -256,6 +346,8 @@ const batchLoading = ref(false)
 const showBatchOperations = ref(false)
 const detailDialogVisible = ref(false)
 const selectedEmail = ref<Email | null>(null)
+const invoiceDetailDialogVisible = ref(false)
+const selectedInvoice = ref<Invoice | null>(null)
 const selectedEmails = ref<Email[]>([])
 
 const emails = ref<Email[]>([])
@@ -280,6 +372,20 @@ const pagination = reactive({
 const hasFilters = computed(() => {
   return Object.values(filters).some(value => value !== '' && value !== null)
 })
+
+const expandedInvoiceRowKeys = computed(() => (
+  emails.value
+    .filter(email => hasRelatedInvoices(email))
+    .map(email => email.id)
+))
+
+const hasRelatedInvoices = (email: Email) => {
+  return Array.isArray(email.related_invoices) && email.related_invoices.length > 0
+}
+
+const getEmailRowClassName = ({ row }: { row: Email }) => {
+  return hasRelatedInvoices(row) ? '' : 'email-row-no-invoices'
+}
 
 // 方法
 const loadEmails = async () => {
@@ -366,11 +472,16 @@ const closeDetailDialog = () => {
 const rescanEmail = async (email: Email & { rescanning?: boolean }) => {
   try {
     email.rescanning = true
-    await batchOperationEmails({
+    const response = await batchOperationEmails({
       email_ids: [email.id],
       operation: 'rescan'
     })
-    ElMessage.success('重新扫描已启动')
+    const message = response.data?.message || '重新扫描完成'
+    if (response.data?.success === false) {
+      ElMessage.warning(message)
+    } else {
+      ElMessage.success(message)
+    }
     await loadEmails()
   } catch (error: any) {
     ElMessage.error('重新扫描失败: ' + error.message)
@@ -478,6 +589,111 @@ const getProcessingStatusText = (status: string) => {
   return textMap[status] || status
 }
 
+const getOCRStatusType = (status?: string): TagType => {
+  const typeMap: Record<string, TagType> = {
+    'pending': 'info',
+    'processing': 'warning',
+    'success': 'success',
+    'failed': 'danger'
+  }
+  return typeMap[status || 'pending'] || 'info'
+}
+
+const getOCRStatusText = (status?: string) => {
+  const textMap: Record<string, string> = {
+    'pending': '待处理',
+    'processing': '识别中',
+    'success': '成功',
+    'failed': '失败'
+  }
+  return textMap[status || 'pending'] || '未知'
+}
+
+const getReimbursementStatusType = (status?: string): TagType => {
+  const typeMap: Record<string, TagType> = {
+    'unreimbursed': 'info',
+    'reimbursed': 'success',
+    'needs_reissue': 'danger',
+    'processing': 'warning',
+    'suspected_red_offset': 'danger'
+  }
+  return typeMap[status || 'unreimbursed'] || 'info'
+}
+
+const getReimbursementStatusText = (status?: string) => {
+  const textMap: Record<string, string> = {
+    'unreimbursed': '未报销',
+    'reimbursed': '已报销',
+    'needs_reissue': '需换开',
+    'processing': '报销中',
+    'suspected_red_offset': '疑似红冲'
+  }
+  return textMap[status || 'unreimbursed'] || '未报销'
+}
+
+const getFirstCommodityName = (invoice: Invoice) => {
+  const detail = Array.isArray(invoice.commodity_details)
+    ? invoice.commodity_details.find(item => item?.name || item?.word)
+    : null
+  if (detail?.name || detail?.word) {
+    return String(detail.name || detail.word)
+  }
+
+  const rawNames = invoice.ocr_raw_data?.words_result?.CommodityName
+  if (Array.isArray(rawNames)) {
+    const first = rawNames.find(item => item?.word || typeof item === 'string')
+    if (first) return typeof first === 'string' ? first : String(first.word)
+  }
+
+  return '-'
+}
+
+const formatInvoiceDate = (dateString?: string) => {
+  if (!dateString) return '-'
+  if (typeof dateString === 'string' && dateString.includes('T')) {
+    return dateString.slice(0, 10)
+  }
+  const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) return '-'
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const formatAmount = (amount: unknown) => {
+  if (amount === null || amount === undefined || amount === '' || Number.isNaN(Number(amount))) {
+    return '-'
+  }
+  return `¥${Number(amount).toFixed(2)}`
+}
+
+const hasValidAmount = (amount: unknown) => {
+  return amount !== null && amount !== undefined && amount !== '' && !Number.isNaN(Number(amount))
+}
+
+const openInvoiceDetail = (invoice: Invoice) => {
+  selectedInvoice.value = invoice
+  invoiceDetailDialogVisible.value = true
+}
+
+const downloadInvoiceFile = async (invoice: Invoice) => {
+  try {
+    const response = await apiDownloadInvoice(invoice.id)
+    const blob = new Blob([response.data], { type: 'application/pdf' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = invoice.original_filename || `${invoice.id}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    ElMessage.error('下载失败')
+  }
+}
+
 const formatDate = (dateString: string) => {
   if (!dateString) return ''
   const date = new Date(dateString)
@@ -530,6 +746,48 @@ onMounted(() => {
   font-size: 12px;
   color: var(--el-color-success);
   margin-top: 2px;
+}
+
+.email-invoices-detail {
+  padding: 10px 16px 14px 96px;
+  background: var(--el-fill-color-lighter);
+}
+
+.inline-invoice-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-regular);
+}
+
+.email-invoice-table {
+  width: 100%;
+}
+
+.commodity-name {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.amount {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+:deep(.email-row-no-invoices .el-table__expand-icon) {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .batch-content {
