@@ -299,7 +299,8 @@
             :fit="false"
             height="100%"
             width="100%"
-            @selection-change="handleSelectionChange"
+            @select="handleRowSelect"
+            @select-all="handleSelectAll"
           >
           <el-table-column type="selection" width="55" />
           <el-table-column
@@ -420,7 +421,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance, TagProps } from 'element-plus'
@@ -443,7 +444,6 @@ const batchDownloading = ref(false)
 const showMoreFilters = ref(false)
 const columnSettingsVisible = ref(false)
 const invoiceTableRef = ref<TableInstance>()
-const isSyncingTableSelection = ref(false)
 
 type InvoiceColumnKey =
   | 'seller'
@@ -665,19 +665,16 @@ const setDropdownOpen = (field: DropdownFilterField, visible: boolean) => {
   openFilterDropdowns[field] = visible
 }
 
-const syncTableSelection = async () => {
+const syncTableSelection = () => {
   const table = invoiceTableRef.value
   if (!table) return
 
-  isSyncingTableSelection.value = true
   table.clearSelection()
   for (const invoice of invoices.value) {
     if (invoiceStore.isSelected(invoice.id)) {
       table.toggleRowSelection(invoice, true)
     }
   }
-  await nextTick()
-  isSyncingTableSelection.value = false
 }
 
 type TagType = NonNullable<TagProps['type']>
@@ -837,8 +834,11 @@ const handleClearSearch = () => {
 }
 
 // 选择变化
-const handleSelectionChange = (selection: Invoice[]) => {
-  if (isSyncingTableSelection.value) return
+const handleRowSelect = (selection: Invoice[], invoice: Invoice) => {
+  invoiceStore.setInvoiceSelected(invoice, selection.some(selected => selected.id === invoice.id))
+}
+
+const handleSelectAll = (selection: Invoice[]) => {
   invoiceStore.syncVisibleSelection(invoices.value, selection)
 }
 
@@ -968,7 +968,7 @@ const goToBatchPrint = () => {
 }
 
 watch([invoices, selectedInvoiceIds], () => {
-  void syncTableSelection()
+  syncTableSelection()
 }, { flush: 'post' })
 
 onMounted(() => {
