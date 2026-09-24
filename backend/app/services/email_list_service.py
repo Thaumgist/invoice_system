@@ -4,14 +4,10 @@
 """
 
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc, func
+from sqlalchemy import and_, desc, func
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
-from html import unescape
-from urllib.parse import unquote, urlparse
 import logging
-import os
-import re
 
 from app.models.email import Email
 from app.models.invoice import Invoice
@@ -26,103 +22,46 @@ class EmailListService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _extract_related_invoice_refs(self, email: Email) -> Tuple[List[str], List[str]]:
+    def _extract_related_invoice_refs(self, email: Email) -> List[str]:
         invoice_ids: List[str] = []
-        filenames: List[str] = []
-
-        def add_id(value: Any) -> None:
-            if value:
-                text = str(value)
-                if text not in invoice_ids:
-                    invoice_ids.append(text)
-
-        def add_filename(value: Any) -> None:
-            if not value:
-                return
-            name = os.path.basename(str(value).strip())
-            if name and name not in filenames:
-                filenames.append(name)
-
         scan_result = email.scan_result or {}
         if isinstance(scan_result, dict):
             for item in scan_result.get("files") or []:
                 if not isinstance(item, dict):
                     continue
-                add_id(item.get("invoice_id"))
-                add_id(item.get("existing_invoice_id"))
-                add_filename(item.get("filename"))
-
-        for item in email.attachment_info or []:
-            if isinstance(item, dict):
-                filename = item.get("filename")
-                add_filename(filename)
-                if filename and str(filename).lower().endswith(".zip"):
-                    stem = os.path.splitext(os.path.basename(str(filename)))[0]
-                    add_filename(f"{stem}__{stem}.pdf")
-
-        body = unescape(f"{email.body_text or ''} {email.body_html or ''}")
-        raw_urls = re.findall(r"https?://[^\s<>\"'{}|\\^`\[\]]+", body, re.IGNORECASE)
-        for raw_url in raw_urls:
-            try:
-                parsed = urlparse(raw_url.strip().rstrip(").,;"))
-            except Exception:
-                continue
-            if parsed.path.lower().endswith(".pdf"):
-                add_filename(unquote(os.path.basename(parsed.path)))
-
-        return invoice_ids, filenames
+                for key in ("invoice_id", "existing_invoice_id"):
+                    value = item.get(key)
+                    if value and str(value) not in invoice_ids:
+                        invoice_ids.append(str(value))
+        return invoice_ids
 
     def _attach_related_invoices(self, user_id: int, emails: List[Email]) -> None:
         if not emails:
             return
 
-        refs_by_email: Dict[str, Tuple[List[str], List[str]]] = {}
-        all_invoice_ids: List[str] = []
-        all_filenames: List[str] = []
-
-        for email in emails:
-            invoice_ids, filenames = self._extract_related_invoice_refs(email)
-            refs_by_email[email.id] = (invoice_ids, filenames)
-            for invoice_id in invoice_ids:
-                if invoice_id not in all_invoice_ids:
-                    all_invoice_ids.append(invoice_id)
-            for filename in filenames:
-                if filename not in all_filenames:
-                    all_filenames.append(filename)
-
-        if not all_invoice_ids and not all_filenames:
+        refs_by_email = {
+            email.id: self._extract_related_invoice_refs(email) for email in emails
+        }
+        all_invoice_ids = list(dict.fromkeys(
+            invoice_id for invoice_ids in refs_by_email.values()
+            for invoice_id in invoice_ids
+        ))
+        if not all_invoice_ids:
             for email in emails:
                 email.related_invoices = []
             return
 
-        query = self.db.query(Invoice).filter(Invoice.user_id == user_id)
-        match_clauses = []
-        if all_invoice_ids:
-            match_clauses.append(Invoice.id.in_(all_invoice_ids))
-        if all_filenames:
-            match_clauses.append(Invoice.original_filename.in_(all_filenames))
-        invoices = query.filter(or_(*match_clauses)).all()
-
+        invoices = self.db.query(Invoice).filter(
+            Invoice.user_id == user_id,
+            Invoice.id.in_(all_invoice_ids),
+        ).all()
         invoices_by_id = {invoice.id: invoice for invoice in invoices}
-        invoices_by_filename: Dict[str, List[Invoice]] = {}
-        for invoice in invoices:
-            invoices_by_filename.setdefault(invoice.original_filename, []).append(invoice)
-
         for email in emails:
-            invoice_ids, filenames = refs_by_email.get(email.id, ([], []))
-            related: List[Invoice] = []
-            seen_ids = set()
-            for invoice_id in invoice_ids:
-                invoice = invoices_by_id.get(invoice_id)
-                if invoice and invoice.id not in seen_ids:
-                    related.append(invoice)
-                    seen_ids.add(invoice.id)
-            for filename in filenames:
-                for invoice in invoices_by_filename.get(filename, []):
-                    if invoice.id not in seen_ids:
-                        related.append(invoice)
-                        seen_ids.add(invoice.id)
-            email.related_invoices = related
+            email.related_invoices = [
+                invoices_by_id[invoice_id]
+                for invoice_id in refs_by_email[email.id]
+                if invoice_id in invoices_by_id
+            ]
 
     def _normalize_email_data(self, email_data: Dict[str, Any]) -> Dict[str, Any]:
         normalized = dict(email_data)
