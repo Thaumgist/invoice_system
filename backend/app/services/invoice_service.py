@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import String, and_, cast, desc, func, or_
+from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Tuple
 from datetime import datetime
@@ -186,13 +186,31 @@ class InvoiceService:
         if getattr(filters, 'commodity_name', None):
             commodity_name = filters.commodity_name.strip()
             if commodity_name:
-                like_value = f"%{commodity_name}%"
-                query = query.filter(
-                    or_(
-                        cast(Invoice.commodity_details, String).like(like_value),
-                        cast(Invoice.ocr_raw_data, String).like(like_value),
-                    )
+                name_sources = (
+                    Invoice.commodity_details,
+                    func.json_extract(Invoice.ocr_raw_data, '$.words_result.CommodityName'),
                 )
+                name_matches = []
+                for source in name_sources:
+                    names = func.json_table(
+                        source,
+                        text(
+                            "'$[*]' COLUMNS ("
+                            "name TEXT PATH '$.name' NULL ON EMPTY NULL ON ERROR, "
+                            "word TEXT PATH '$.word' NULL ON EMPTY NULL ON ERROR, "
+                            "value TEXT PATH '$' NULL ON EMPTY NULL ON ERROR)"
+                        ),
+                    ).table_valued('name', 'word', 'value')
+                    name_matches.append(
+                        select(1).select_from(names).where(
+                            or_(
+                                names.c.name.contains(commodity_name, autoescape=True),
+                                names.c.word.contains(commodity_name, autoescape=True),
+                                names.c.value.contains(commodity_name, autoescape=True),
+                            )
+                        ).correlate(Invoice).exists()
+                    )
+                query = query.filter(or_(*name_matches))
         
         if filters.date_from:
             query = query.filter(Invoice.invoice_date >= filters.date_from)
@@ -211,7 +229,7 @@ class InvoiceService:
                 query = query.filter(amount_expr <= filters.amount_max)
         
         # 计算总数
-        total = query.count()
+        total = query.with_entities(func.count(Invoice.id)).scalar()
         
         # 应用分页和排序
         invoices = query.order_by(desc(Invoice.created_at)).offset(

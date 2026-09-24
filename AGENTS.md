@@ -21,6 +21,7 @@
 - 页面可整体纵向滚动，表格内部也有独立纵向滚动；展开更多筛选不能压缩或隐藏表格。
 - 保留表格主体横向滚动，操作列固定在视窗内右侧；不重新加入单独的表头横向滚动条。
 - 筛选条件与列设置相互独立。报销状态为未报销、已报销、需换开、报销中、疑似红冲；不恢复通用状态列，OCR 状态可保留。
+- 商品名称仅搜索商品明细中的名称和 OCR words_result.CommodityName 名称列表，兼容 name/word 对象及旧字符串数组；不得模糊搜索整份商品明细或 OCR JSON。金额使用独立金额筛选；名称中的 %、_ 等字符按字面匹配。
 - 默认验证桌面环境，除非用户要求，不切换手机模拟。
 
 ## 验证与环境路径
@@ -33,3 +34,5 @@
 - 测试不得修改真实发票内容、报销状态或删除真实数据。隔离测试使用合成数据；明确区分组件验证、构建验证与浏览器实测。
 - 2026-09-24 勾选回归使用 Node 18.20.8、Vue 3.5.18、Pinia 2.3.1、Element Plus 2.10.7，生产依赖位于验证容器 /app/node_modules；额外隔离依赖 jsdom 22.1.0 位于 /tmp/selection-deps/node_modules，不修改项目依赖清单或锁文件。
 - 本机隔离脚本位于被 Git 忽略的 tmp/selection-validation-20260924/run.cjs，容器中只读挂载到 /checks/run.cjs；正式验证记录见 docs/selection-regression-2026-09-24.md。
+- 2026-09-24 商品搜索验证环境：invoice_backend 容器的 /usr/local/bin/python（Python 3.11.13），依赖 /usr/local/lib/python3.11/site-packages（SQLAlchemy 2.0.23），数据库为 MySQL 8.0.46。代码挂载到 /app/app，未新增依赖或数据库字段。
+- 商品搜索验证脚本位于本机忽略目录 tmp/commodity-search-validation-20260924/，容器副本为 /tmp/commodity-search-validation-20260924.py 和 /tmp/commodity-search-live-readonly-20260924.py；正式记录见 docs/commodity-search-regression-2026-09-24.md。
