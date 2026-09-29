@@ -68,7 +68,7 @@ class Invoice(InvoiceBase):
     id: str
     user_id: int
     original_filename: str
-    file_path: str
+    file_path: Optional[str] = None
     file_size: Optional[int]
     status: str
     ocr_status: str

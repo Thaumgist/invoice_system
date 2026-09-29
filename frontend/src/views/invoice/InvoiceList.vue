@@ -158,6 +158,7 @@
                   <el-option label="识别中" value="processing" />
                   <el-option label="成功" value="success" />
                   <el-option label="失败" value="failed" />
+                  <el-option label="非发票" value="not_invoice" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -380,13 +381,13 @@
                 详情
               </el-button>
               <el-button
-                v-if="row.ocr_status === 'failed'"
+                v-if="row.ocr_status === 'failed' && row.file_path"
                 link size="small"
                 @click="retryOCR(row.id)"
               >
                 重试
               </el-button>
-              <el-button type="success" link size="small" @click="downloadInvoice(row.id, row.original_filename)">
+              <el-button v-if="row.file_path" type="success" link size="small" @click="downloadInvoice(row.id, row.original_filename)">
                 下载
               </el-button>
               <el-button type="danger" link size="small" @click="deleteInvoice(row.id)">
@@ -684,7 +685,8 @@ const getOCRStatusType = (status: string): TagType => {
     'pending': 'info',
     'processing': 'warning',
     'success': 'success',
-    'failed': 'danger'
+    'failed': 'danger',
+    'not_invoice': 'info'
   }
   return statusMap[status] || 'info'
 }
@@ -694,7 +696,8 @@ const getOCRStatusText = (status: string) => {
     'pending': '待处理',
     'processing': '识别中',
     'success': '成功',
-    'failed': '失败'
+    'failed': '失败',
+    'not_invoice': '非发票'
   }
   return statusMap[status] || '未知'
 }

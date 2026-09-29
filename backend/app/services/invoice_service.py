@@ -438,6 +438,27 @@ class InvoiceService:
                 log_level="ERROR",
             )
 
+        elif status == "not_invoice":
+            invoice.ocr_error_message = ocr_data.get("error_message", "不是可识别的发票")
+            invoice.status = "not_invoice"
+            logging_service.log_invoice_event(
+                db=self.db,
+                event_type="ocr_not_invoice",
+                message=f"OCR判定为非发票: {invoice.original_filename}",
+                user_id=invoice.user_id,
+                invoice_id=invoice_id,
+                details={
+                    "old_status": old_status,
+                    "new_status": "not_invoice",
+                    "old_ocr_status": old_ocr_status,
+                    "new_ocr_status": status,
+                    "change_reason": "ocr_not_invoice",
+                    "error_message": invoice.ocr_error_message,
+                    "processed_at": invoice.processed_at.isoformat(),
+                },
+                log_level="WARNING",
+            )
+
         # 提交并对唯一约束做兜底处理
         try:
             self.db.commit()
@@ -466,9 +487,9 @@ class InvoiceService:
         
         # 删除关联文件（处理相对路径）
         invoice_file_path = invoice.file_path
-        if not os.path.isabs(invoice_file_path):
+        if invoice_file_path and not os.path.isabs(invoice_file_path):
             invoice_file_path = get_absolute_file_path(invoice_file_path)
-        if os.path.exists(invoice_file_path):
+        if invoice_file_path and os.path.exists(invoice_file_path):
             os.remove(invoice_file_path)
         
         # 删除附件文件（处理相对路径）

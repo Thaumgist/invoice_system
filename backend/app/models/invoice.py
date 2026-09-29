@@ -16,7 +16,7 @@ class Invoice(Base):
 
     # 文件信息
     original_filename = Column(String(255), nullable=False)
-    file_path = Column(String(500), nullable=False)
+    file_path = Column(String(500), nullable=True)
     file_size = Column(Integer)
     file_md5_hash = Column(String(32), index=True)  # MD5哈希值，用于快速去重
     file_sha256_hash = Column(String(64), index=True)  # SHA256哈希值，用于精确验证
@@ -55,8 +55,8 @@ class Invoice(Base):
     reimbursement_status = Column(String(30), default="unreimbursed", index=True)  # unreimbursed, reimbursed, needs_reissue, processing, suspected_red_offset
 
     # 状态管理
-    status = Column(String(30), default="processing", index=True)  # pending, processing, completed, failed, archived, duplicate, suspected_red_offset
-    ocr_status = Column(String(20), default="pending")  # pending, processing, success, failed
+    status = Column(String(30), default="processing", index=True)  # pending, processing, completed, failed, not_invoice, archived, duplicate, suspected_red_offset
+    ocr_status = Column(String(20), default="pending")  # pending, processing, success, failed, not_invoice
     ocr_error_message = Column(Text)
 
     # 时间戳

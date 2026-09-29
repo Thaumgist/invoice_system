@@ -2,11 +2,14 @@ import imaplib
 import email
 import re
 import requests
+import ipaddress
+import socket
 from email.header import decode_header
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urljoin
 from html import unescape
+from html.parser import HTMLParser
 import base64
 import os
 import tempfile
@@ -25,6 +28,34 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
 logger = logging.getLogger(__name__)
+
+
+class _InvoiceAnchorParser(HTMLParser):
+    """Collect anchor destinations with their human-visible labels."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.anchors: List[Tuple[str, str]] = []
+        self._href: Optional[str] = None
+        self._text_parts: List[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "a":
+            return
+        href = dict(attrs).get("href")
+        if href:
+            self._href = href
+            self._text_parts = []
+
+    def handle_data(self, data):
+        if self._href is not None:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "a" and self._href is not None:
+            self.anchors.append((self._href, "".join(self._text_parts)))
+            self._href = None
+            self._text_parts = []
 
 
 class EmailService:
@@ -803,7 +834,7 @@ class EmailService:
             return None
     
     def _extract_pdf_links(self, email_body: str) -> List[str]:
-        """从邮件正文中提取PDF下载链接"""
+        """从邮件正文中提取已有文件链接和语义明确的 PDF 发票锚点。"""
         body = unescape(email_body or "")
         if not body:
             return []
@@ -838,6 +869,11 @@ class EmailService:
             if url.startswith(("http://", "https://")) and is_candidate(url) and url not in links:
                 links.append(url)
 
+        def add_invoice_anchor(value: str) -> None:
+            url = normalize_url(value)
+            if url.startswith(("http://", "https://")) and url not in links:
+                links.append(url)
+
         redirect_param_names = {
             "jump_to", "jump_gatewayurl", "url", "target", "targeturl",
             "downloadurl", "download_url", "fileurl", "file_url"
@@ -855,7 +891,94 @@ class EmailService:
                 for value in values:
                     add_candidate(value)
 
+        # Short links such as t.aliyun.com do not reveal the file type in their
+        # URL. Only accept them when the visible anchor label explicitly says it
+        # leads to a PDF invoice; XML/OFD and generic "download" links stay out.
+        parser = _InvoiceAnchorParser()
+        try:
+            parser.feed(body)
+            parser.close()
+        except Exception:
+            parser.anchors = []
+        for href, anchor_text in parser.anchors:
+            if self._is_explicit_pdf_invoice_anchor(anchor_text):
+                add_invoice_anchor(href)
+
         return links
+
+    @staticmethod
+    def _is_explicit_pdf_invoice_anchor(anchor_text: str) -> bool:
+        """Return whether a normalized HTML label unambiguously names a PDF invoice."""
+        normalized = re.sub(r"[\s\u3000]+", "", unescape(anchor_text or "")).lower()
+        return "pdf" in normalized and ("发票" in normalized or "invoice" in normalized)
+
+    @staticmethod
+    def _is_safe_download_url(url: str) -> bool:
+        """Reject non-web, credentialed, and local-network download targets."""
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                return False
+            if parsed.username or parsed.password:
+                return False
+
+            host = parsed.hostname
+            try:
+                addresses = [ipaddress.ip_address(host)]
+            except ValueError:
+                addresses = [
+                    ipaddress.ip_address(item[4][0])
+                    for item in socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+                ]
+            return bool(addresses) and all(address.is_global for address in addresses)
+        except (OSError, ValueError):
+            return False
+
+    def _download_limited_response(self, url: str, headers: Dict[str, str]):
+        """Fetch a public URL with bounded redirects and bounded streaming content."""
+        current_url = url
+        max_bytes = settings.MAX_FILE_SIZE
+        for _ in range(settings.EMAIL_DOWNLOAD_MAX_REDIRECTS + 1):
+            if not self._is_safe_download_url(current_url):
+                raise ValueError("下载地址不是允许的公网 HTTP(S) 地址")
+
+            response = requests.get(
+                current_url,
+                headers=headers,
+                timeout=settings.EMAIL_DOWNLOAD_TIMEOUT,
+                allow_redirects=False,
+                stream=True,
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                response.close()
+                if not location:
+                    raise ValueError("下载重定向缺少目标地址")
+                current_url = urljoin(current_url, location)
+                continue
+
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > max_bytes:
+                response.close()
+                raise ValueError("下载文件超过大小限制")
+
+            chunks: List[bytes] = []
+            size = 0
+            try:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError("下载文件超过大小限制")
+                    chunks.append(chunk)
+                return response, b"".join(chunks), current_url
+            except Exception:
+                response.close()
+                raise
+
+        raise ValueError("下载重定向次数超过限制")
     
     def _process_pdf_attachment(self, user_id: int, attachment: Dict, email_id: str = None) -> Optional[Dict]:
         """处理PDF附件"""
@@ -942,17 +1065,14 @@ class EmailService:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
-            response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-            response.raise_for_status()
-            
-            content_bytes = response.content or b""
+            response, content_bytes, effective_url = self._download_limited_response(url, headers)
             if not content_bytes:
+                response.close()
                 return []
 
             # 检查内容类型
             content_type = response.headers.get('content-type', '').lower()
             is_pdf_ct = ('pdf' in content_type) or ('application/octet-stream' in content_type)
-            effective_url = response.url or url
             effective_path = urlparse(effective_url).path.lower()
             is_pdf_url = effective_path.endswith('.pdf')
             is_zip_ct = 'zip' in content_type
@@ -974,16 +1094,21 @@ class EmailService:
                     if attachment.get('source_archive'):
                         result['source_archive'] = attachment['source_archive']
                     zip_results.append(result)
+                response.close()
                 return zip_results
 
             if (not is_pdf_ct) and (not is_pdf_url):
+                response.close()
                 return []
 
             # 验证PDF魔数
             if not content_bytes or not content_bytes.startswith(b'%PDF'):
+                response.close()
                 return []
             if not self._is_likely_invoice_pdf(filename, content_bytes, f"{effective_url} {context_text}"):
+                response.close()
                 return []
+            response.close()
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             temp_file.write(content_bytes)
             temp_file.close()

@@ -1,5 +1,7 @@
 from celery import Task
+from celery.exceptions import Retry
 from app.workers.celery_app import celery_app
+from app.core.config import settings, get_absolute_file_path
 from app.core.database import SessionLocal
 from app.services.invoice_service import InvoiceService
 import os
@@ -29,7 +31,7 @@ class DatabaseTask(Task):
             self._db.close()
 
 
-@celery_app.task(base=DatabaseTask, bind=True, max_retries=3, rate_limit="2/s")
+@celery_app.task(base=DatabaseTask, bind=True, max_retries=settings.OCR_RETRY_TIMES, rate_limit="2/s")
 def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = None):
     """处理发票OCR识别任务"""
     start_time = datetime.now()
@@ -90,16 +92,10 @@ def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = No
         ocr_result = ocr_service.recognize_invoice(file_path, user_id=user_id, invoice_id=invoice_id)
         processing_time = (datetime.now() - start_time).total_seconds()
         
-        # 判断OCR是否成功：有words_result且没有error_code，或者error_code为0
-        is_success = False
-        if "words_result" in ocr_result and "error_code" not in ocr_result:
-            # 检查words_result是否为空
-            words_result = ocr_result.get("words_result", {})
-            if words_result:  # words_result不为空才算成功
-                is_success = True
-        elif ocr_result.get("error_code") == 0:
-            # 有error_code但为0也表示成功
-            is_success = True
+        # 仅在 OCR 返回了实际字段时才算成功。部分服务会以
+        # error_code=0 表示请求成功，但识别结果仍可能为空。
+        words_result = ocr_result.get("words_result", {})
+        is_success = bool(words_result) and ocr_result.get("error_code") in (None, 0)
         
         if is_success:
             # OCR成功
@@ -122,24 +118,40 @@ def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = No
             
             return {"status": "success", "invoice_id": invoice_id}
         else:
-            # OCR失败
+            # OCR失败。-6 或成功响应但没有字段，表示文件不是可识别发票；
+            # 网络、令牌、超时、服务端异常和 QPS 限制可以自动重试。
             error_msg = ocr_result.get("error_msg", "OCR识别失败")
             error_code = ocr_result.get("error_code")
-            # 当服务商返回QPS超限（例如 error_code=18）时，采用指数退避重试
-            is_rate_limited = False
             try:
-                is_rate_limited = int(error_code) == 18
-            except Exception:
-                pass
-            if is_rate_limited and self.request.retries < self.max_retries:
-                backoff_seconds = min(60, (2 ** self.request.retries))  # 1, 2, 4, ... 上限60
-                logger.warning(f"OCR QPS超限，{backoff_seconds}s后重试: {invoice_id}")
-                # 记录重试日志
+                normalized_error_code = int(error_code)
+            except (TypeError, ValueError):
+                normalized_error_code = None
+
+            is_not_invoice = normalized_error_code == -6 or (
+                normalized_error_code == 0 and not ocr_result.get("words_result")
+            )
+            if is_not_invoice:
+                invoice_service.update_ocr_result(
+                    invoice_id,
+                    {"error_message": error_msg, "error_code": error_code},
+                    "not_invoice",
+                )
+                _remove_not_invoice_source_file(self.db, invoice)
+                logger.info(f"OCR判定为非发票，已清理源文件: {invoice_id}")
+                return {"status": "not_invoice", "invoice_id": invoice_id}
+
+            retryable_error_codes = {-5, -3, -2, -1, 18}
+            is_retryable = normalized_error_code in retryable_error_codes
+            if is_retryable and self.request.retries < self.max_retries:
+                backoff_seconds = min(300, 30 * (2 ** self.request.retries))
+                invoice.ocr_status = "pending"
+                self.db.commit()
+                logger.warning(f"OCR临时失败，{backoff_seconds}s后重试: {invoice_id}")
                 try:
                     logging_service.log_ocr_event(
                         db=self.db,
-                        event_type="ocr_rate_limited_retry",
-                        message=f"OCR QPS超限，{backoff_seconds}s后重试",
+                        event_type="ocr_retrying",
+                        message=f"OCR临时失败，{backoff_seconds}s后自动重试",
                         user_id=user_id,
                         invoice_id=invoice_id,
                         details={
@@ -150,9 +162,13 @@ def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = No
                         },
                         log_level="WARNING",
                     )
+                    self.db.commit()
                 except Exception:
-                    pass
+                    self.db.rollback()
                 raise self.retry(countdown=backoff_seconds)
+
+            if is_retryable:
+                error_msg = f"{error_msg}（已完成 {self.max_retries} 次自动重试）"
             invoice_service.update_ocr_result(
                 invoice_id, 
                 {"error_message": error_msg}, 
@@ -211,6 +227,8 @@ def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = No
             
             return {"status": "failed", "message": error_msg}
             
+    except Retry:
+        raise
     except Exception as exc:
         processing_time = (datetime.now() - start_time).total_seconds()
         logger.error(f"发票OCR识别异常: {invoice_id}, 错误: {str(exc)}")
@@ -308,3 +326,23 @@ def process_invoice_ocr(self, invoice_id: str, file_path: str, user_id: int = No
             pass
         
         return {"status": "error", "message": str(exc)}
+
+
+def _remove_not_invoice_source_file(db, invoice: Invoice) -> None:
+    """Remove only managed stored files, then make the non-invoice record non-downloadable."""
+    source_path = invoice.file_path
+    if not source_path:
+        return
+
+    try:
+        absolute_path = os.path.realpath(get_absolute_file_path(source_path))
+        storage_root = os.path.realpath(settings.UPLOAD_DIR)
+        if os.path.commonpath([absolute_path, storage_root]) != storage_root:
+            raise ValueError("非发票文件路径不在受管存储目录中")
+        if os.path.isfile(absolute_path):
+            os.remove(absolute_path)
+        invoice.file_path = None
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error(f"清理非发票源文件失败: {invoice.id}, 错误: {str(exc)}")

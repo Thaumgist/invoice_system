@@ -392,6 +392,12 @@ def retry_ocr(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="发票OCR识别已成功，无需重试"
         )
+
+    if not invoice.file_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该文件已被判定为非发票并清理，无法重试 OCR",
+        )
     
     # 重置OCR状态并重新处理
     invoice.ocr_status = "pending"
@@ -496,6 +502,11 @@ def download_invoice(
         )
     
     # 将数据库中的相对路径转换为绝对路径
+    if not invoice.file_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="非发票文件已清理",
+        )
     absolute_file_path = get_absolute_file_path(invoice.file_path)
     
     if not os.path.exists(absolute_file_path):
@@ -543,6 +554,8 @@ def download_invoices(
     try:
         with zipfile.ZipFile(temporary_file.name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for invoice in invoices:
+                if not invoice.file_path:
+                    continue
                 file_path = get_absolute_file_path(invoice.file_path)
                 if not os.path.isfile(file_path):
                     continue

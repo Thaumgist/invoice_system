@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", os.path.abspath(os.path.join(os.getcwd(), "storage")))
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", "10485760"))  # 10MB
     ALLOWED_FILE_TYPES: List[str] = ["pdf"]
+    EMAIL_DOWNLOAD_TIMEOUT: int = int(os.getenv("EMAIL_DOWNLOAD_TIMEOUT", "30"))
+    EMAIL_DOWNLOAD_MAX_REDIRECTS: int = int(os.getenv("EMAIL_DOWNLOAD_MAX_REDIRECTS", "3"))
     
     # 百度OCR配置
     BAIDU_OCR_API_KEY: Optional[str] = os.getenv("BAIDU_OCR_API_KEY")

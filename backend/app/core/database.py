@@ -55,6 +55,13 @@ def _ensure_schema_updates():
             "DEFAULT 'unreimbursed'"
         )
 
+    file_path_column = next(
+        (column for column in inspector.get_columns("invoices") if column["name"] == "file_path"),
+        None,
+    )
+    if file_path_column and not file_path_column["nullable"]:
+        statements.append("ALTER TABLE invoices MODIFY COLUMN file_path VARCHAR(500) NULL")
+
     if not statements:
         return
 
