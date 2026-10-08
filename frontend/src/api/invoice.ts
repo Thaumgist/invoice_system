@@ -9,6 +9,11 @@ import type {
 } from '@/types/invoice'
 import api from '@/utils/request'
 
+export const uploadInvoiceLink = (url: string) => api.post<InvoiceUploadResponse>(
+  '/invoices/upload-link', { url },
+  { timeout: 180000, headers: { 'X-Suppress-Error-Toast': 'true' } }
+)
+
 // 上传发票
 export const uploadInvoice = (file: File) => {
   const formData = new FormData()
@@ -23,6 +28,7 @@ export const uploadInvoice = (file: File) => {
 
 // 获取发票列表
 export const getInvoices = (params: {
+  invoice_num?: string
   page?: number
   size?: number
   status?: string
@@ -52,6 +58,7 @@ export const getInvoices = (params: {
   }
 
   const body: any = {
+    invoice_num: params.invoice_num?.trim() || undefined,
     page: params.page ?? 1,
     size: params.size ?? 20,
     status: params.status,

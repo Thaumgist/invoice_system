@@ -35,6 +35,21 @@
                 </div>
               </div>
           </el-upload>
+          <div class="link-upload">
+            <div class="guides-title">通过链接添加发票</div>
+            <el-input
+              v-model="linkText"
+              type="textarea"
+              :rows="4"
+              :disabled="submittingLinks"
+              aria-label="PDF 发票链接"
+              placeholder="粘贴一个或多个 PDF 发票链接，每行一个（最多 20 个）"
+            />
+            <p class="muted">支持公网 HTTP/HTTPS 下载链接，下载结果显示在右侧上传记录中。</p>
+            <el-button type="primary" :loading="submittingLinks" :disabled="!linkText.trim()" @click="submitLinks">
+              {{ submittingLinks ? '正在添加' : '添加发票' }}
+            </el-button>
+          </div>
           <div v-if="uploadStats.total" class="upload-summary">
             <span>本次 {{ uploadStats.total }} 个</span>
             <span>成功 {{ uploadStats.success }} 个</span>
@@ -99,7 +114,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, type UploadProps, type UploadRawFile, type TagProps } from 'element-plus'
 import { UploadFilled, Document } from '@element-plus/icons-vue'
 import { useUserStore } from '../../stores/user'
-import { getInvoice } from '../../api/invoice'
+import { getInvoice, uploadInvoiceLink } from '../../api/invoice'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -115,6 +130,9 @@ interface UploadedFile {
 const uploadRef = ref()
 const uploadedFiles = ref<UploadedFile[]>([])
 const uploadDisabled = ref(false)
+const linkText = ref('')
+const submittingLinks = ref(false)
+let unmounted = false
 const activeUploadCount = ref(0)
 const uploadStats = reactive({
   total: 0,
@@ -217,6 +235,7 @@ const pollInvoiceStatus = (uid: string, invoiceId: string, attempt = 0) => {
   const timer = setTimeout(async () => {
     try {
       const response = await getInvoice(invoiceId)
+      if (unmounted) return
       const invoice = response.data
 
       if (invoice.ocr_status === 'success') {
@@ -231,12 +250,12 @@ const pollInvoiceStatus = (uid: string, invoiceId: string, attempt = 0) => {
         return
       }
 
-      if (invoice.ocr_status === 'failed') {
+      if (invoice.ocr_status === 'failed' || invoice.ocr_status === 'not_invoice') {
         upsertUploadRecord({
           uid,
           id: invoiceId,
           filename: invoice.original_filename,
-          status: 'failed',
+          status: invoice.ocr_status,
           message: invoice.ocr_error_message || 'OCR识别失败'
         })
         clearPollingTimer(uid)
@@ -292,6 +311,48 @@ const beforeUpload: UploadProps['beforeUpload'] = (rawFile: UploadRawFile) => {
   return true
 }
 
+const submitLinks = async () => {
+  if (submittingLinks.value) return
+  const links = [...new Set(linkText.value.trim().split(/\s+/).filter(Boolean))]
+  if (links.length === 0 || links.length > 20) {
+    ElMessage.warning('每次请输入 1 至 20 个链接')
+    return
+  }
+  if (links.some(link => {
+    try {
+      const parsed = new URL(link)
+      return !['http:', 'https:'].includes(parsed.protocol) || !!parsed.username || !!parsed.password
+    } catch { return true }
+  })) {
+    ElMessage.warning('请输入有效的 HTTP/HTTPS 链接，每行一个，链接中不能包含登录凭据')
+    return
+  }
+  submittingLinks.value = true
+  const batch = links.map((url, index) => ({ url, uid: crypto.randomUUID(), name: `链接 ${index + 1}` }))
+  batch.forEach(item => {
+    markUploadStarted(item.uid, item.name)
+    upsertUploadRecord({ uid: item.uid, filename: item.name, status: 'uploading', message: '等待下载' })
+  })
+  try {
+    for (const item of batch) {
+      if (unmounted) break
+      upsertUploadRecord({ uid: item.uid, filename: item.name, message: '正在下载 PDF 发票' })
+      try {
+        const response = await uploadInvoiceLink(item.url)
+        if (!unmounted) handleSuccess(response.data, item)
+      } catch (error) {
+        if (!unmounted) {
+          const failure = error as { response?: { status?: number; data?: unknown } }
+          handleError({ status: failure.response?.status, response: { data: failure.response?.data } }, item)
+        }
+      }
+    }
+    if (!unmounted) linkText.value = ''
+  } finally {
+    submittingLinks.value = false
+  }
+}
+
 const handleProgress: UploadProps['onProgress'] = (_event: any, uploadFile: any) => {
   markUploadStarted(getUploadUid(uploadFile), uploadFile.name)
 }
@@ -313,7 +374,7 @@ const handleSuccess = (response: any, uploadFile: any) => {
   }
 }
 
-const handleError: UploadProps['onError'] = (error: any, uploadFile: any) => {
+const handleError = (error: any, uploadFile: any) => {
   const uid = getUploadUid(uploadFile)
 
   // 优先从响应体读取后端返回
@@ -386,6 +447,7 @@ const getStatusText = (status: string) => {
     'completed': '已完成',
     'duplicate': '重复',
     'failed': '失败',
+    'not_invoice': '非发票',
     'suspected_red_offset': '疑似红冲',
     'archived': '已归档',
     'printed': '已打印',
@@ -399,6 +461,7 @@ const viewInvoice = (id: string) => {
 }
 
 onBeforeUnmount(() => {
+  unmounted = true
   pollingTimers.forEach(timer => clearTimeout(timer))
   pollingTimers.clear()
 })
@@ -406,6 +469,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .upload-grid { align-items: flex-start; }
+.link-upload { margin-top: 20px; }
+.link-upload .muted { font-size: 13px; margin-bottom: 12px; }
 
 
 .upload-surface {

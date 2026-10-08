@@ -50,6 +50,7 @@ export interface Invoice {
 }
 
 export interface InvoiceFilter {
+  invoice_num?: string
   status?: string
   ocr_status?: string
   seller_name?: string

@@ -145,6 +145,9 @@
 
           <el-row :gutter="32" class="more-filters-row">
             <el-col :span="8">
+              <el-form-item label="发票号码">
+                <el-input v-model="filters.invoice_num" clearable placeholder="输入完整或部分发票号码" />
+              </el-form-item>
               <el-form-item label="OCR状态">
                 <el-select
                   v-model="filters.ocr_status"
@@ -541,6 +544,7 @@ type InvoiceListFilters = InvoiceFilter & {
 }
 
 const createDefaultFilters = (): InvoiceListFilters => ({
+  invoice_num: '',
   ocr_status: '',
   commodity_name: '',
   reimbursement_status: '',

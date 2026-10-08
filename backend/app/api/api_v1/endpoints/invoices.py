@@ -28,8 +28,52 @@ from app.core.metrics import EMAIL_DUPLICATES
 from hashlib import md5, sha256
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from io import BytesIO
+from starlette.concurrency import run_in_threadpool
+from app.services.email_service import EmailService
 
 router = APIRouter()
+
+
+class InvoiceLinkUpload(BaseModel):
+    url: str = Field(..., min_length=1, max_length=8192)
+
+
+@router.post("/upload-link", response_model=InvoiceUploadResponse)
+async def upload_invoice_link(
+    body: InvoiceLinkUpload,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    service = EmailService(db)
+
+    def download():
+        response = None
+        try:
+            response, content, effective_url = service._download_limited_response(
+                body.url.strip(), {"User-Agent": "InvoiceSystem", "Accept": "application/pdf"}
+            )
+            filename = Path(service._extract_filename_from_url(effective_url, response).replace("\\", "/")).name
+            if not content.startswith(b"%PDF-"):
+                raise ValueError("链接未返回 PDF 文件，请提供可直接下载的 PDF 发票链接")
+            if not service._is_likely_invoice_pdf(filename, content):
+                raise ValueError("下载的 PDF 未通过发票预判")
+            filename = (Path(filename).stem[:180] or "invoice") + ".pdf"
+            return filename, content
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except Exception:
+            raise HTTPException(status_code=400, detail="下载失败，请检查链接是否有效、已过期或需要登录") from None
+        finally:
+            if response is not None:
+                response.close()
+
+    filename, content = await run_in_threadpool(download)
+    file = UploadFile(filename=filename, file=BytesIO(content))
+    try:
+        return await upload_invoice(file, current_user, db)
+    finally:
+        await file.close()
 
 
 @router.post("/upload", response_model=InvoiceUploadResponse)
@@ -147,6 +191,7 @@ async def upload_invoice(
 
 @router.get("/", response_model=InvoiceListResponse)
 def get_invoices(
+    invoice_num: Optional[str] = Query(None, description="发票号码筛选（包含匹配）"),
     status: Optional[str] = Query(None, description="发票状态筛选"),
     ocr_status: Optional[str] = Query(None, description="OCR状态筛选"),
     seller_name: Optional[str] = Query(None, description="销售方名称筛选"),
@@ -166,6 +211,7 @@ def get_invoices(
     invoice_service = InvoiceService(db)
     
     filters = InvoiceFilter(
+        invoice_num=invoice_num,
         status=status,
         ocr_status=ocr_status,
         seller_name=seller_name,
@@ -194,6 +240,7 @@ def get_invoices(
 
 # 新增：POST 搜索接口，支持在请求体中提交复杂筛选条件
 class InvoiceSearchRequest(BaseModel):
+    invoice_num: Optional[str] = None
     status: Optional[str] = None
     ocr_status: Optional[str] = None
     seller_name: Optional[str] = None
@@ -234,6 +281,7 @@ def search_invoices(
 
     filters = InvoiceFilter(
         status=body.status,
+        invoice_num=body.invoice_num,
         ocr_status=body.ocr_status,
         seller_name=body.seller_name,
         purchaser_name=body.purchaser_name,

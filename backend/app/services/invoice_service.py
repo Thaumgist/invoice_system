@@ -151,6 +151,8 @@ class InvoiceService:
     ) -> Tuple[List[Invoice], int]:
         """获取发票列表"""
         query = self.db.query(Invoice).filter(Invoice.user_id == user_id)
+        if filters.invoice_num and filters.invoice_num.strip():
+            query = query.filter(Invoice.invoice_num.contains(filters.invoice_num.strip(), autoescape=True))
         # 全局去重：默认不展示重复发票，除非显式请求包含
         if not include_duplicates:
             query = query.filter(Invoice.status != 'duplicate')

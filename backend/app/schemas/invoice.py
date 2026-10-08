@@ -84,6 +84,7 @@ class Invoice(InvoiceBase):
 
 # 发票列表查询参数
 class InvoiceFilter(BaseModel):
+    invoice_num: Optional[str] = None
     status: Optional[str] = None
     ocr_status: Optional[str] = None
     seller_name: Optional[str] = None

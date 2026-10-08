@@ -4,6 +4,8 @@ import re
 import requests
 import ipaddress
 import socket
+import time
+import urllib3
 from email.header import decode_header
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
@@ -938,45 +940,60 @@ class EmailService:
         """Fetch a public URL with bounded redirects and bounded streaming content."""
         current_url = url
         max_bytes = settings.MAX_FILE_SIZE
+        deadline = time.monotonic() + 45
         for _ in range(settings.EMAIL_DOWNLOAD_MAX_REDIRECTS + 1):
             if not self._is_safe_download_url(current_url):
                 raise ValueError("下载地址不是允许的公网 HTTP(S) 地址")
-
-            response = requests.get(
-                current_url,
-                headers=headers,
-                timeout=settings.EMAIL_DOWNLOAD_TIMEOUT,
-                allow_redirects=False,
-                stream=True,
-            )
-            if response.status_code in {301, 302, 303, 307, 308}:
-                location = response.headers.get("location")
-                response.close()
-                if not location:
-                    raise ValueError("下载重定向缺少目标地址")
-                current_url = urljoin(current_url, location)
-                continue
-
-            response.raise_for_status()
-            content_length = response.headers.get("content-length")
-            if content_length and int(content_length) > max_bytes:
-                response.close()
-                raise ValueError("下载文件超过大小限制")
-
-            chunks: List[bytes] = []
-            size = 0
+            parsed = urlparse(current_url)
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+            if not addresses or not all(ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+                raise ValueError("下载地址不是允许的公网 HTTP(S) 地址")
+            address = addresses[0][4][0]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("下载超时")
+            timeout = urllib3.Timeout(connect=min(10, remaining), read=min(settings.EMAIL_DOWNLOAD_TIMEOUT, remaining))
+            if parsed.scheme == "https":
+                pool = urllib3.HTTPSConnectionPool(address, port, assert_hostname=parsed.hostname, server_hostname=parsed.hostname)
+            else:
+                pool = urllib3.HTTPConnectionPool(address, port)
+            upstream = None
             try:
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    size += len(chunk)
-                    if size > max_bytes:
+                target = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
+                upstream = pool.urlopen(
+                    "GET", target, headers={**headers, "Host": parsed.netloc},
+                    redirect=False, retries=False, preload_content=False, timeout=timeout,
+                )
+                if upstream.status in {301, 302, 303, 307, 308}:
+                    location = upstream.headers.get("location")
+                    if not location:
+                        raise ValueError("下载重定向缺少目标地址")
+                    current_url = urljoin(current_url, location)
+                    continue
+                if upstream.status != 200:
+                    raise ValueError("下载失败，服务器未返回完整文件")
+                content_length = upstream.headers.get("content-length")
+                if content_length and int(content_length) > max_bytes:
+                    raise ValueError("下载文件超过大小限制")
+                content = bytearray()
+                for chunk in upstream.stream(64 * 1024, decode_content=True):
+                    if time.monotonic() > deadline:
+                        raise ValueError("下载超时")
+                    content.extend(chunk)
+                    if len(content) > max_bytes:
                         raise ValueError("下载文件超过大小限制")
-                    chunks.append(chunk)
-                return response, b"".join(chunks), current_url
-            except Exception:
-                response.close()
-                raise
+                response = requests.Response()
+                response.status_code = upstream.status
+                response.headers.update(upstream.headers)
+                response.url = current_url
+                response._content = bytes(content)
+                response._content_consumed = True
+                return response, response.content, current_url
+            finally:
+                if upstream is not None:
+                    upstream.close()
+                pool.close()
 
         raise ValueError("下载重定向次数超过限制")
     
