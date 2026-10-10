@@ -36,6 +36,12 @@ const router = createRouter({
           meta: { title: '发票上传' }
         },
         {
+          path: '/reimbursements',
+          name: 'ReimbursementMatch',
+          component: () => import('@/views/reimbursement/ReimbursementMatch.vue'),
+          meta: { title: '报销单匹配' }
+        },
+        {
           path: '/invoices/:id',
           name: 'InvoiceDetail',
           component: () => import('@/views/invoice/InvoiceDetail.vue'),

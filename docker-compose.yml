@@ -38,6 +38,9 @@ services:
   # FastAPI后端应用
   backend:
     image: ${BACKEND_IMAGE:-ghcr.io/ke4king/invoice_system-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: invoice_backend
     restart: unless-stopped
     ports:
@@ -67,6 +70,9 @@ services:
   # Celery异步任务处理器
   celery_worker:
     image: ${BACKEND_IMAGE:-ghcr.io/ke4king/invoice_system-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: invoice_celery_worker
     restart: unless-stopped
     command: celery -A app.workers.celery_app worker --loglevel=info
@@ -93,6 +99,9 @@ services:
   # Celery定时任务调度器
   celery_beat:
     image: ${BACKEND_IMAGE:-ghcr.io/ke4king/invoice_system-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: invoice_celery_beat
     restart: unless-stopped
     command: celery -A app.workers.celery_app beat --loglevel=info

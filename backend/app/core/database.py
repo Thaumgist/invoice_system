@@ -30,7 +30,7 @@ def get_db():
 def init_db():
     """初始化数据库表"""
     # 导入所有模型以确保它们被注册到Base.metadata
-    from app.models import user, invoice, attachment, email_config, system_log
+    from app.models import user, invoice, attachment, email_config, system_log, reimbursement
     
     # 创建所有表
     Base.metadata.create_all(bind=engine)

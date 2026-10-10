@@ -34,7 +34,7 @@ export interface Invoice {
   service_type?: string
   commodity_details?: any[]
   ocr_raw_data?: any
-  reimbursement_status?: 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'processing' | 'suspected_red_offset'
+  reimbursement_status?: ReimbursementStatus
   travel_date?: string
   travel_time?: string
   
@@ -103,11 +103,11 @@ export interface InvoiceUpdate {
   amount_in_figures?: number
   service_type?: string
   commodity_details?: any[]
-  reimbursement_status?: 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'processing' | 'suspected_red_offset'
+  reimbursement_status?: ReimbursementStatus
   status?: string
 }
 
-export type ReimbursementStatus = 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'processing' | 'suspected_red_offset'
+export type ReimbursementStatus = 'unreimbursed' | 'reimbursed' | 'needs_reissue' | 'rejected' | 'processing' | 'suspected_red_offset'
 
 export interface BatchReimbursementStatusUpdate {
   invoice_ids: string[]

@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     OCR_TIMEOUT: int = int(os.getenv("OCR_TIMEOUT", "30"))
     OCR_AMOUNT_IN_CENTS: bool = os.getenv("OCR_AMOUNT_IN_CENTS", "false").lower() == "true"
     OCR_QPS_LIMIT: int = int(os.getenv("OCR_QPS_LIMIT", "2"))
+    REIMBURSEMENT_MAX_PAGES: int = 20
+    REIMBURSEMENT_TIMEOUT: int = 150
     
     # 邮箱配置
     DEFAULT_EMAIL_SERVER: str = os.getenv("DEFAULT_EMAIL_SERVER", "imap.gmail.com")

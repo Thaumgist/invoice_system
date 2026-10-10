@@ -345,6 +345,7 @@ const getReimbursementStatusType = (status?: string) => {
     unreimbursed: 'info',
     reimbursed: 'success',
     needs_reissue: 'danger',
+    rejected: 'danger',
     processing: 'warning',
     suspected_red_offset: 'danger'
   }
@@ -356,6 +357,7 @@ const getReimbursementStatusText = (status?: string) => {
     unreimbursed: '未报销',
     reimbursed: '已报销',
     needs_reissue: '需换开',
+    rejected: '被打回',
     processing: '报销中',
     suspected_red_offset: '疑似红冲'
   }

@@ -82,6 +82,7 @@
                 <el-option label="未报销" value="unreimbursed" />
                 <el-option label="已报销" value="reimbursed" />
                 <el-option label="需换开" value="needs_reissue" />
+                <el-option label="被打回" value="rejected" />
                 <el-option label="报销中" value="processing" />
                 <el-option label="疑似红冲" value="suspected_red_offset" />
               </el-select>
@@ -279,6 +280,9 @@
                   <el-dropdown-item command="needs_reissue">
                     <el-tag type="danger">需换开</el-tag>
                   </el-dropdown-item>
+                  <el-dropdown-item command="rejected">
+                    <el-tag type="danger">被打回</el-tag>
+                  </el-dropdown-item>
                   <el-dropdown-item command="processing">
                     <el-tag type="warning">报销中</el-tag>
                   </el-dropdown-item>
@@ -361,6 +365,9 @@
                       <el-dropdown-item command="needs_reissue">
                         <el-tag type="danger">需换开</el-tag>
                       </el-dropdown-item>
+                      <el-dropdown-item command="rejected">
+                        <el-tag type="danger">被打回</el-tag>
+                      </el-dropdown-item>
                       <el-dropdown-item command="processing">
                         <el-tag type="warning">报销中</el-tag>
                       </el-dropdown-item>
@@ -431,6 +438,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance, TagProps } from 'element-plus'
 import { ArrowDown, ArrowUp, Download, Refresh, Setting, UploadFilled } from '@element-plus/icons-vue'
 import { useInvoiceStore } from '../../stores/invoice'
+import { getReimbursementStatusType } from '../../utils/reimbursement'
 import {
   downloadInvoice as apiDownloadInvoice,
   downloadInvoices as apiDownloadInvoices,
@@ -706,22 +714,12 @@ const getOCRStatusText = (status: string) => {
   return statusMap[status] || '未知'
 }
 
-const getReimbursementStatusType = (status?: string): TagType => {
-  const statusMap: Record<string, TagType> = {
-    'unreimbursed': 'info',
-    'reimbursed': 'success',
-    'needs_reissue': 'danger',
-    'processing': 'warning',
-    'suspected_red_offset': 'danger'
-  }
-  return statusMap[status || 'unreimbursed'] || 'info'
-}
-
 const getReimbursementStatusText = (status?: string) => {
   const statusMap: Record<string, string> = {
     'unreimbursed': '未报销',
     'reimbursed': '已报销',
     'needs_reissue': '需换开',
+    'rejected': '被打回',
     'processing': '报销中',
     'suspected_red_offset': '疑似红冲',
   }

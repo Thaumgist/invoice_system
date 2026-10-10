@@ -41,6 +41,15 @@
             </div>
           </el-tooltip>
         </el-menu-item>
+
+        <el-menu-item index="/reimbursements">
+          <el-tooltip :effect="tooltipEffect" content="报销单匹配" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
+            <div class="menu-item-inner">
+              <el-icon><Tickets /></el-icon>
+              <span>报销单匹配</span>
+            </div>
+          </el-tooltip>
+        </el-menu-item>
         
         <el-menu-item index="/emails">
           <el-tooltip :effect="tooltipEffect" content="邮件列表" placement="right" :disabled="!sidebarCollapsed" :popper-options="tooltipPopperOptions">
@@ -213,7 +222,8 @@ import {
   SwitchButton,
   Fold,
   Expand,
-  UploadFilled
+  UploadFilled,
+  Tickets
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useThemeStore } from '@/stores/theme'

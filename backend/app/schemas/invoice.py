@@ -53,6 +53,7 @@ class BatchReimbursementStatusUpdate(BaseModel):
         "unreimbursed",
         "reimbursed",
         "needs_reissue",
+        "rejected",
         "processing",
         "suspected_red_offset",
     ]

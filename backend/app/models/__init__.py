@@ -4,5 +4,14 @@ from .invoice import Invoice
 from .attachment import Attachment
 from .email_config import EmailConfig
 from .system_log import SystemLog
+from .reimbursement import ReimbursementJob, ReimbursementReport
 
-__all__ = ["User", "Invoice", "Attachment", "EmailConfig", "SystemLog"]
+__all__ = [
+    "User",
+    "Invoice",
+    "Attachment",
+    "EmailConfig",
+    "SystemLog",
+    "ReimbursementJob",
+    "ReimbursementReport",
+]
